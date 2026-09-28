@@ -1,0 +1,44 @@
+{
+  "uid": "service-overview",
+  "title": "Service Overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "timezone": "utc",
+  "tags": ["platform", "service"],
+  "time": {"from": "now-1h", "to": "now"},
+  "templating": {"list": [{
+    "name": "service",
+    "type": "query",
+    "datasource": {"type": "prometheus", "uid": "prometheus"},
+    "query": "label_values(http_server_request_duration_seconds_count, service_name)",
+    "refresh": 2,
+    "includeAll": false
+  }]},
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Request rate",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"$service\"}[5m]))"}]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Error rate",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(rate(http_server_request_duration_seconds_count{service_name=\"$service\",http_response_status_code=~\"5..\"}[5m])) / clamp_min(sum(rate(http_server_request_duration_seconds_count{service_name=\"$service\"}[5m])), 1e-9)"}]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Latency p99",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=\"$service\"}[5m])))"}]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Top failing routes",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "legendFormat": "{{http_route}} {{http_response_status_code}}", "expr": "topk(5, sum by (http_route, http_response_status_code) (rate(http_server_request_duration_seconds_count{service_name=\"$service\",http_response_status_code=~\"5..\"}[5m])))"}]
+    }
+  ]
+}

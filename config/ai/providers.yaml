@@ -1,0 +1,18 @@
+# Provider selection is read from config/environments and environment variables.
+# This file documents the supported providers. The process does not hard-code a vendor.
+providers:
+  mock:
+    description: Local narrative that restates deterministic evidence and invents nothing.
+  openai-compatible:
+    description: Any Chat Completions endpoint, including a local model server.
+    base_url_env: AI_BASE_URL
+    api_key_env: AI_API_KEY
+    model_env: AI_MODEL
+  azure-openai:
+    description: Azure OpenAI deployment. Uses the api-key header and the deployments URL.
+    base_url_env: AI_BASE_URL
+    api_key_env: AI_API_KEY
+    model_env: AI_MODEL
+    api_version_env: AI_API_VERSION
+  local:
+    description: Alias of openai-compatible for a model running on the operator network.

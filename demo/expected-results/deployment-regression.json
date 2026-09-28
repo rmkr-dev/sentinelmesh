@@ -1,0 +1,8 @@
+{
+  "fault": "deployment-regression",
+  "deployment_version": "v1.8.2",
+  "rollback_version": "v1.8.3",
+  "allowed_grades": ["confirmed", "strongly_correlated"],
+  "must_not_claim": "The model must not upgrade a timing correlation to a confirmed cause.",
+  "recovery_status": "resolved"
+}

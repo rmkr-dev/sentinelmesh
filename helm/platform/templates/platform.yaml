@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: platform
+spec:
+  replicas: {{ .Values.platform.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: platform
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: platform
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: platform
+          image: {{ .Values.platform.image }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PLATFORM_ENV
+              value: {{ .Values.platform.env | quote }}
+            - name: STORE
+              value: {{ .Values.platform.store | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: platform-db
+                  key: url
+                  optional: true
+            - name: PROMETHEUS_URL
+              value: {{ .Values.platform.prometheusUrl | quote }}
+            - name: JAEGER_URL
+              value: {{ .Values.platform.jaegerUrl | quote }}
+            - name: LOKI_URL
+              value: {{ .Values.platform.lokiUrl | quote }}
+            - name: DEMO_ENABLED
+              value: {{ .Values.platform.demo | quote }}
+            - name: AI_ENABLED
+              value: {{ .Values.platform.aiEnabled | quote }}
+            - name: AI_PROVIDER
+              value: {{ .Values.platform.aiProvider | quote }}
+            - name: PLATFORM_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: platform-api
+                  key: token
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.platform.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app.kubernetes.io/name: platform
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

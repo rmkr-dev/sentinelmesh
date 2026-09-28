@@ -1,0 +1,12 @@
+name: order-service
+team: checkout
+owner: checkout-oncall
+criticality: high
+version: 1.8.1
+repository: github.com/rmkr-dev/sentinelmesh
+dependencies:
+  - payment-service
+  - inventory-service
+  - notification-service
+attributes:
+  tier: application

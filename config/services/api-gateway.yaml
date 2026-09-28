@@ -1,0 +1,11 @@
+name: api-gateway
+team: checkout
+owner: checkout-oncall
+criticality: high
+version: 1.8.1
+repository: github.com/rmkr-dev/sentinelmesh
+dependencies:
+  - order-service
+  - inventory-service
+attributes:
+  tier: edge

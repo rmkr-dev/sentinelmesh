@@ -1,0 +1,7 @@
+name: outage
+fault: dependency-outage
+service: payment-service
+expected_telemetry:
+  - payment-service HTTP 503
+  - order-service client errors
+expected_alert: HighErrorRate

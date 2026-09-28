@@ -1,0 +1,10 @@
+# Example for another repository in the same organization.
+# Replace the repository path with the path that hosts this platform.
+name: example-service
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  ci:
+    uses: rmkr-dev/sentinelmesh/.github/workflows/service-ci.yml@v0.1.0

@@ -1,0 +1,15 @@
+name: deployment-regression
+fault: deployment-regression
+service: payment-service
+steps:
+  - start healthy traffic
+  - enable fault deployment-regression
+  - observe error rate, latency, traces, and logs
+  - wait for one correlated incident
+  - analyze
+  - expect a deployment correlation, not an automatic confirmed cause, unless the control-plane fault record is cited as the observed injection
+  - disable the fault, which records rollback version v1.8.3
+  - tick until the SLO windows are healthy and the incident is resolved
+expected:
+  alert: HighErrorRate
+  single_incident: true

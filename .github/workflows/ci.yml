@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  service:
+    uses: ./.github/workflows/service-ci.yml
+
+  terraform:
+    uses: ./.github/workflows/terraform.yml
+
+  security:
+    uses: ./.github/workflows/security.yml
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Helm lint
+        run: helm lint helm/platform
+      - name: Helm template
+        run: helm template platform helm/platform --namespace observability > /tmp/rendered.yaml && test -s /tmp/rendered.yaml
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Documentation links
+        run: python3 scripts/validate-docs.py

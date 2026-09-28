@@ -1,0 +1,24 @@
+{
+  "uid": "slo",
+  "title": "SLO",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "timezone": "utc",
+  "tags": ["platform", "slo"],
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "SLO status code (1 healthy, 2 at risk, 3 breached)",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "legendFormat": "{{service}} {{slo}} {{window}}", "expr": "platform_slo_status"}]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Availability SLI (1m)",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "legendFormat": "{{service_name}}", "expr": "1 - (sum by (service_name) (rate(http_server_request_duration_seconds_count{http_response_status_code=~\"5..\"}[1m])) / clamp_min(sum by (service_name) (rate(http_server_request_duration_seconds_count[1m])), 1e-9))"}]
+    }
+  ]
+}

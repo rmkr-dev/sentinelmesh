@@ -1,0 +1,32 @@
+{
+  "uid": "incident-investigation",
+  "title": "Incident Investigation",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "timezone": "utc",
+  "tags": ["platform", "incident"],
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {
+      "id": 1, "type": "text", "title": "Where the timeline lives",
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
+      "options": {"mode": "markdown", "content": "Deployment markers, evidence grades, and the incident timeline are on the platform console at port 8080. This dashboard is the telemetry view: error rate, latency, logs, and a link into Jaeger. Do not treat a spike next to a deploy annotation as a confirmed cause."}
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Errors and latency",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "error {{service_name}}", "expr": "sum by (service_name) (rate(http_server_request_duration_seconds_count{http_response_status_code=~\"5..\"}[1m]))"},
+        {"refId": "B", "legendFormat": "p99 {{service_name}}", "expr": "histogram_quantile(0.99, sum by (service_name, le) (rate(http_server_request_duration_seconds_bucket[1m])))"}
+      ]
+    },
+    {
+      "id": 3, "type": "logs", "title": "Recent error logs",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{"refId": "A", "expr": "{service_name=~\".+\"} |= \"error\""}]
+    }
+  ]
+}

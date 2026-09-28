@@ -1,0 +1,215 @@
+name: observability
+
+x-demo: &demo
+  image: sentinelmesh:local
+  build:
+    context: .
+    dockerfile: Dockerfile
+  entrypoint: ["/usr/local/bin/demo"]
+  environment: &otel
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+    OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+    PLATFORM_URL: http://platform:8080
+  depends_on:
+    otel-collector:
+      condition: service_started
+    platform:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      POSTGRES_DB: platform
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/01-shop.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.136.0
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./collectors/otel-collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      - jaeger
+      - loki
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    volumes:
+      - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "9093:9093"
+
+  loki:
+    image: grafana/loki:3.4.2
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./deploy/loki/loki.yml:/etc/loki/loki.yml:ro
+    ports:
+      - "3100:3100"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.67.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-observability}
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards/grafana:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - jaeger
+
+  platform:
+    image: sentinelmesh:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PLATFORM_ENV: local
+      STORE: postgres
+      DATABASE_URL: postgres://platform:platform@postgres:5432/platform?sslmode=disable
+      PROMETHEUS_URL: http://prometheus:9090
+      JAEGER_URL: http://jaeger:16686
+      LOKI_URL: http://loki:3100
+      GRAFANA_URL: http://localhost:3000
+      JAEGER_UI_URL: http://localhost:16686
+      DEMO_ENABLED: "true"
+      AI_ENABLED: "true"
+      AI_PROVIDER: mock
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/obsctl", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  storefront:
+    <<: *demo
+    environment:
+      <<: *otel
+      SERVICE_NAME: storefront
+      HTTP_ADDR: ":8080"
+      GATEWAY_URL: http://api-gateway:8080
+      OTEL_RESOURCE_ATTRIBUTES: service.version=1.8.1,deployment.environment=local,cloud.provider=local,cloud.region=local,team=checkout,owner=checkout-oncall,criticality=medium,deployment.id=local,git.commit.sha=dev,build.version=1.8.1
+    ports:
+      - "8081:8080"
+
+  api-gateway:
+    <<: *demo
+    environment:
+      <<: *otel
+      SERVICE_NAME: api-gateway
+      HTTP_ADDR: ":8080"
+      ORDER_URL: http://order-service:8080
+      INVENTORY_URL: http://inventory-service:8080
+      OTEL_RESOURCE_ATTRIBUTES: service.version=1.8.1,deployment.environment=local,cloud.provider=local,cloud.region=local,team=checkout,owner=checkout-oncall,criticality=high,deployment.id=local,git.commit.sha=dev,build.version=1.8.1
+
+  order-service:
+    <<: *demo
+    environment:
+      <<: *otel
+      SERVICE_NAME: order-service
+      HTTP_ADDR: ":8080"
+      PAYMENT_URL: http://payment-service:8080
+      INVENTORY_URL: http://inventory-service:8080
+      NOTIFICATION_URL: http://notification-service:8080
+      SHOP_DATABASE_URL: postgres://platform:platform@postgres:5432/shop?sslmode=disable
+      OTEL_RESOURCE_ATTRIBUTES: service.version=1.8.1,deployment.environment=local,cloud.provider=local,cloud.region=local,team=checkout,owner=checkout-oncall,criticality=high,deployment.id=local,git.commit.sha=dev,build.version=1.8.1
+    depends_on:
+      otel-collector:
+        condition: service_started
+      platform:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  payment-service:
+    <<: *demo
+    environment:
+      <<: *otel
+      SERVICE_NAME: payment-service
+      HTTP_ADDR: ":8080"
+      OTEL_RESOURCE_ATTRIBUTES: service.version=1.8.1,deployment.environment=local,cloud.provider=local,cloud.region=local,team=payments,owner=payments-oncall,criticality=high,deployment.id=local,git.commit.sha=dev,build.version=1.8.1
+
+  inventory-service:
+    <<: *demo
+    environment:
+      <<: *otel
+      SERVICE_NAME: inventory-service
+      HTTP_ADDR: ":8080"
+      SHOP_DATABASE_URL: postgres://platform:platform@postgres:5432/shop?sslmode=disable
+      OTEL_RESOURCE_ATTRIBUTES: service.version=1.8.1,deployment.environment=local,cloud.provider=local,cloud.region=local,team=catalog,owner=catalog-oncall,criticality=high,deployment.id=local,git.commit.sha=dev,build.version=1.8.1
+    depends_on:
+      otel-collector:
+        condition: service_started
+      platform:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  notification-service:
+    <<: *demo
+    environment:
+      <<: *otel
+      SERVICE_NAME: notification-service
+      HTTP_ADDR: ":8080"
+      OTEL_RESOURCE_ATTRIBUTES: service.version=1.8.1,deployment.environment=local,cloud.provider=local,cloud.region=local,team=checkout,owner=checkout-oncall,criticality=low,deployment.id=local,git.commit.sha=dev,build.version=1.8.1
+
+  trafficgen:
+    image: sentinelmesh:local
+    entrypoint: ["/usr/local/bin/trafficgen"]
+    environment:
+      TARGET_URL: http://storefront:8080
+      RPS: "2"
+    depends_on:
+      - storefront
+    restart: unless-stopped
+
+volumes:
+  pgdata: {}

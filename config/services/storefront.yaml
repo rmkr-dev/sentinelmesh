@@ -1,0 +1,10 @@
+name: storefront
+team: checkout
+owner: checkout-oncall
+criticality: medium
+version: 1.8.1
+repository: github.com/rmkr-dev/sentinelmesh
+dependencies:
+  - api-gateway
+attributes:
+  tier: edge

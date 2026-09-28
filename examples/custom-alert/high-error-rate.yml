@@ -1,0 +1,14 @@
+groups:
+  - name: example
+    rules:
+      - alert: ExampleHighErrorRate
+        expr: |
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m]))
+          /
+          clamp_min(sum by (service_name) (rate(http_server_request_duration_seconds_count[5m])), 1e-9)
+          > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service_name }} error ratio is above 5%"

@@ -1,0 +1,9 @@
+name: shop-postgres
+team: catalog
+owner: catalog-oncall
+criticality: high
+version: "16"
+repository: github.com/rmkr-dev/sentinelmesh
+dependencies: []
+attributes:
+  tier: datastore

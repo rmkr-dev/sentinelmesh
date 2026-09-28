@@ -1,0 +1,758 @@
+// Package engine runs the observability loop: SLI evaluation, anomaly checks,
+// correlation, incident updates, and deterministic RCA. The AI provider is not
+// called from the loop.
+package engine
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/rmkr-dev/sentinelmesh/internal/ai"
+	"github.com/rmkr-dev/sentinelmesh/internal/anomaly"
+	"github.com/rmkr-dev/sentinelmesh/internal/correlation"
+	"github.com/rmkr-dev/sentinelmesh/internal/domain"
+	"github.com/rmkr-dev/sentinelmesh/internal/incident"
+	"github.com/rmkr-dev/sentinelmesh/internal/rca"
+	"github.com/rmkr-dev/sentinelmesh/internal/runbook"
+	"github.com/rmkr-dev/sentinelmesh/internal/slo"
+	"github.com/rmkr-dev/sentinelmesh/internal/store"
+	"github.com/rmkr-dev/sentinelmesh/internal/telemetryquery"
+)
+
+// Dependencies are the read-only telemetry backends. Any of them may be absent.
+type Dependencies struct {
+	Metrics telemetryquery.MetricQuery
+	Traces  *telemetryquery.JaegerClient
+	Logs    *telemetryquery.LokiClient
+}
+
+// Engine is the SRE control loop.
+type Engine struct {
+	Store       store.Store
+	Deps        Dependencies
+	Conventions telemetryquery.Conventions
+	Runbooks    []runbook.Runbook
+	Window      time.Duration
+	Lookback    time.Duration
+	Log         *slog.Logger
+	Now         func() time.Time
+	AI          ai.Provider
+	AIEnabled   bool
+
+	mu          sync.Mutex
+	metricState string
+	traceState  string
+	logState    string
+}
+
+// ComponentHealth reports backend reachability. The AI layer is intentionally absent.
+type ComponentHealth struct {
+	Metrics string `json:"metrics"`
+	Traces  string `json:"traces"`
+	Logs    string `json:"logs"`
+}
+
+// Health returns the last observed backend state.
+func (e *Engine) Health() ComponentHealth {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return ComponentHealth{
+		Metrics: orState(e.metricState),
+		Traces:  orState(e.traceState),
+		Logs:    orState(e.logState),
+	}
+}
+
+func (e *Engine) now() time.Time {
+	if e.Now != nil {
+		return e.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (e *Engine) log() *slog.Logger {
+	if e.Log != nil {
+		return e.Log
+	}
+	return slog.Default()
+}
+
+// Tick evaluates the catalog once.
+func (e *Engine) Tick(ctx context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := e.now()
+	services, err := e.Store.ListServices(ctx)
+	if err != nil {
+		return err
+	}
+	defs, err := e.Store.ListSLOs(ctx)
+	if err != nil {
+		return err
+	}
+	results, sloSignals := e.evaluateSLOs(ctx, defs, now)
+	anomalySignals := e.detectAnomalies(ctx, services, now)
+	alertSignals := e.alertSignals(ctx, now)
+	contextSignals := e.contextSignals(ctx, now)
+
+	symptoms := append(append([]domain.Signal{}, sloSignals...), anomalySignals...)
+	symptoms = append(symptoms, alertSignals...)
+	all := append(symptoms, contextSignals...)
+
+	deps := map[string][]string{}
+	for _, s := range services {
+		deps[s.Name] = s.Dependencies
+	}
+	groups := correlation.Correlate(all, correlation.Options{
+		Window:             e.window(),
+		DeploymentLookback: e.lookback(),
+		Dependencies:       deps,
+	})
+	open, err := e.Store.ListIncidents(ctx, store.IncidentFilter{})
+	if err != nil {
+		return err
+	}
+	for _, g := range groups {
+		if err := e.upsertGroup(ctx, g, services, results, open, now); err != nil {
+			return err
+		}
+	}
+	fresh, err := e.Store.ListIncidents(ctx, store.IncidentFilter{})
+	if err != nil {
+		return err
+	}
+	for _, inc := range fresh {
+		if err := e.maybeRecover(ctx, inc, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Engine) evaluateSLOs(ctx context.Context, defs []domain.SLODefinition, now time.Time) ([]domain.SLOResult, []domain.Signal) {
+	var results []domain.SLOResult
+	var signals []domain.Signal
+	if e.Deps.Metrics == nil {
+		e.metricState = "not_configured"
+		return nil, nil
+	}
+	failed := false
+	for _, def := range defs {
+		for _, w := range def.Windows {
+			counts, ok, err := e.counts(ctx, def, w)
+			if err != nil {
+				failed = true
+				e.log().Warn("slo query failed", "service", def.Service, "slo", def.Name, "error", err.Error())
+				continue
+			}
+			if !ok {
+				res := domain.SLOResult{
+					Service: def.Service, SLO: def.Name, Window: w.Name, Target: def.Objective,
+					Status: domain.SLONoData, ErrorBudgetRemaining: 100, EvaluatedAt: now,
+				}
+				_ = e.Store.SaveSLOResult(ctx, res)
+				results = append(results, res)
+				continue
+			}
+			res, err := slo.Evaluate(def, w, counts, now)
+			if err != nil {
+				e.log().Warn("slo evaluate failed", "error", err.Error())
+				continue
+			}
+			if err := e.Store.SaveSLOResult(ctx, res); err != nil {
+				e.log().Warn("slo save failed", "error", err.Error())
+			}
+			results = append(results, res)
+			// Compliance horizons stay on the SLO record. Only short windows
+			// open incidents, so a 30 day budget burn does not hold an incident
+			// open after the fast window has recovered.
+			if operationalWindow(w) && (res.Status == domain.SLOBreached || res.Status == domain.SLOAtRisk) {
+				signals = append(signals, domain.Signal{
+					ID:          fmt.Sprintf("slo-%s-%s-%s", def.Service, def.Name, w.Name),
+					Type:        domain.SignalSLO,
+					Service:     def.Service,
+					Severity:    res.Status,
+					Summary:     fmt.Sprintf("%s %s %s is %s (SLI %.3f%%, burn %.2f)", def.Service, def.Name, w.Name, res.Status, res.Current, res.BurnRate),
+					Fingerprint: fmt.Sprintf("slo|%s|%s|%s|%s", def.Service, def.Name, w.Name, res.Status),
+					OccurredAt:  now,
+					Attributes:  map[string]string{"slo": def.Name, "window": w.Name, "status": res.Status},
+				})
+			}
+		}
+	}
+	if failed {
+		e.metricState = "degraded"
+	} else {
+		e.metricState = "ok"
+	}
+	return results, signals
+}
+
+func (e *Engine) counts(ctx context.Context, def domain.SLODefinition, w domain.SLOWindow) (slo.Counts, bool, error) {
+	conv := e.Conventions
+	total, ok, err := e.Deps.Metrics.Instant(ctx, conv.TotalQuery(def.Service, w.Name))
+	if err != nil || !ok {
+		return slo.Counts{}, ok, err
+	}
+	if def.Indicator == "latency" {
+		threshold := 0.5
+		if def.ThresholdMS > 0 {
+			threshold = def.ThresholdMS / 1000
+		}
+		samples, err := e.Deps.Metrics.Vector(ctx, conv.LatencyBucketsQuery(def.Service, w.Name))
+		if err != nil {
+			return slo.Counts{}, false, err
+		}
+		good, gok := telemetryquery.SelectLatencyBucket(samples, threshold)
+		if !gok {
+			good = 0
+		}
+		if good > total {
+			good = total
+		}
+		return slo.Counts{Good: good, Total: total}, true, nil
+	}
+	bad, bok, err := e.Deps.Metrics.Instant(ctx, conv.BadQuery(def.Service, w.Name))
+	if err != nil {
+		return slo.Counts{}, false, err
+	}
+	if !bok {
+		bad = 0
+	}
+	good := total - bad
+	if good < 0 {
+		good = 0
+	}
+	return slo.Counts{Good: good, Total: total}, true, nil
+}
+
+func (e *Engine) detectAnomalies(ctx context.Context, services []domain.Service, now time.Time) []domain.Signal {
+	if e.Deps.Metrics == nil {
+		return nil
+	}
+	var signals []domain.Signal
+	for _, svc := range services {
+		q := e.Conventions.ErrorRatioQuery(svc.Name, "1m")
+		points, err := e.Deps.Metrics.Range(ctx, q, now.Add(-30*time.Minute), now, time.Minute)
+		if err != nil {
+			e.metricState = "degraded"
+			continue
+		}
+		if len(points) == 0 {
+			continue
+		}
+		series := anomaly.Series{Service: svc.Name, Metric: "error_ratio", Points: points}
+		for _, det := range []anomaly.Detector{anomaly.ZScoreDetector{}, anomaly.RateChangeDetector{}, anomaly.ThresholdDetector{}} {
+			params := anomaly.Params{}
+			if det.Name() == "threshold" {
+				params.Threshold = 0.05
+			}
+			found, err := det.Detect(series, params)
+			if err != nil {
+				continue
+			}
+			for _, a := range found {
+				a.ID = fmt.Sprintf("%s-%s-%d", a.Service, a.Detector, a.DetectedAt.UnixNano())
+				a.DetectedAt = now
+				_ = e.Store.SaveAnomaly(ctx, a)
+				signals = append(signals, domain.Signal{
+					ID:          a.ID,
+					Type:        domain.SignalAnomaly,
+					Service:     svc.Name,
+					Severity:    "warning",
+					Summary:     a.Summary,
+					Fingerprint: "anomaly|" + svc.Name + "|" + a.Detector + "|" + a.Metric,
+					OccurredAt:  now,
+					Attributes:  map[string]string{"detector": a.Detector, "metric": a.Metric},
+				})
+			}
+		}
+	}
+	return signals
+}
+
+func (e *Engine) alertSignals(ctx context.Context, now time.Time) []domain.Signal {
+	alerts, err := e.Store.ListAlerts(ctx, now.Add(-e.window()))
+	if err != nil {
+		return nil
+	}
+	var signals []domain.Signal
+	for _, a := range alerts {
+		if a.Status != "firing" {
+			continue
+		}
+		signals = append(signals, domain.Signal{
+			ID:          a.ID,
+			Type:        domain.SignalAlert,
+			Service:     a.Service,
+			Severity:    a.Severity,
+			Summary:     a.Name + ": " + a.Summary,
+			Fingerprint: "alert|" + a.Fingerprint,
+			OccurredAt:  a.StartsAt,
+			Attributes:  a.Labels,
+		})
+	}
+	return signals
+}
+
+func (e *Engine) contextSignals(ctx context.Context, now time.Time) []domain.Signal {
+	var signals []domain.Signal
+	faults, err := e.Store.ListFaults(ctx)
+	if err == nil {
+		for _, f := range faults {
+			if !f.Enabled {
+				continue
+			}
+			signals = append(signals, domain.Signal{
+				ID:          "fault-" + f.Name,
+				Type:        domain.SignalFault,
+				Service:     f.Service,
+				Summary:     fmt.Sprintf("Fault %s enabled on %s (%s)", f.Name, f.Service, f.Kind),
+				Fingerprint: "fault|" + f.Name,
+				OccurredAt:  f.UpdatedAt,
+				Attributes:  map[string]string{"observed": "true", "fault": f.Name, "kind": f.Kind},
+			})
+		}
+	}
+	deploys, err := e.Store.ListDeployments(ctx, "", 100)
+	if err == nil {
+		for _, d := range deploys {
+			if now.Sub(d.Timestamp) > e.lookback() {
+				continue
+			}
+			signals = append(signals, domain.Signal{
+				ID:          "deploy-" + d.ID,
+				Type:        domain.SignalDeployment,
+				Service:     d.Service,
+				Summary:     fmt.Sprintf("Deployment %s:%s", d.Service, d.Version),
+				Fingerprint: "deploy|" + d.ID,
+				OccurredAt:  d.Timestamp,
+				Attributes:  map[string]string{"version": d.Version, "git_sha": d.GitSHA},
+			})
+		}
+	}
+	return signals
+}
+
+func (e *Engine) upsertGroup(ctx context.Context, g correlation.Group, services []domain.Service, results []domain.SLOResult, open []domain.Incident, now time.Time) error {
+	primary := primaryService(g)
+	var existing *domain.Incident
+	for i := range open {
+		inc := &open[i]
+		if !incident.Open(inc.Status) {
+			continue
+		}
+		if !overlaps(*inc, g.Services) {
+			continue
+		}
+		if now.Sub(inc.UpdatedAt) > 15*time.Minute && now.Sub(inc.DetectedAt) > 15*time.Minute {
+			continue
+		}
+		existing = inc
+		break
+	}
+	if existing == nil {
+		id, err := e.Store.NextIncidentID(ctx, now)
+		if err != nil {
+			return err
+		}
+		inc := domain.Incident{
+			ID:              id,
+			Severity:        severityFor(services, g, results),
+			Status:          domain.StatusDetected,
+			Title:           fmt.Sprintf("Correlated symptoms on %s", primary),
+			Service:         primary,
+			Environment:     environmentFor(services, primary),
+			StartedAt:       g.Started,
+			DetectedAt:      now,
+			Signals:         append([]domain.Signal{}, g.Signals...),
+			RelatedServices: others(g.Services, primary),
+			UpdatedAt:       now,
+		}
+		inc.Events = timelineFromSignals(g, now)
+		inc.Events = append([]domain.TimelineEntry{{
+			ID: id + "-created", At: now, Kind: "incident", Actor: "engine",
+			Message: "Incident created from correlated signals",
+		}}, inc.Events...)
+		e.applyAnalysis(ctx, &inc, results, now)
+		return e.Store.SaveIncident(ctx, inc)
+	}
+	before := len(existing.Signals)
+	for _, s := range g.Signals {
+		if !hasFingerprint(existing.Signals, s.Fingerprint) {
+			existing.Signals = append(existing.Signals, s)
+			existing.Events = append(existing.Events, domain.TimelineEntry{
+				ID: s.ID, At: s.OccurredAt, Kind: s.Type, Message: s.Summary, Actor: "engine",
+			})
+		}
+	}
+	existing.RelatedServices = union(existing.RelatedServices, others(g.Services, existing.Service))
+	existing.UpdatedAt = now
+	if len(existing.Signals) != before {
+		e.applyAnalysis(ctx, existing, results, now)
+	}
+	return e.Store.SaveIncident(ctx, *existing)
+}
+
+func (e *Engine) applyAnalysis(ctx context.Context, inc *domain.Incident, results []domain.SLOResult, now time.Time) {
+	deploys, _ := e.Store.ListDeployments(ctx, "", 50)
+	faults, _ := e.Store.ListFaults(ctx)
+	var changes []domain.Signal
+	for _, f := range faults {
+		if !f.Enabled {
+			continue
+		}
+		if f.Service != inc.Service && !contains(inc.RelatedServices, f.Service) {
+			continue
+		}
+		changes = append(changes, domain.Signal{
+			Type: domain.SignalFault, Service: f.Service, OccurredAt: f.UpdatedAt,
+			Summary:    fmt.Sprintf("Fault %s enabled on %s (%s)", f.Name, f.Service, f.Kind),
+			Attributes: map[string]string{"observed": "true", "fault": f.Name, "kind": f.Kind},
+		})
+	}
+	var relevant []domain.Deployment
+	names := append([]string{inc.Service}, inc.RelatedServices...)
+	for _, d := range deploys {
+		if contains(names, d.Service) {
+			relevant = append(relevant, d)
+		}
+	}
+	var sloResults []domain.SLOResult
+	for _, r := range results {
+		if contains(names, r.Service) {
+			sloResults = append(sloResults, r)
+		}
+	}
+	pack := rca.Pack{
+		Incident:    *inc,
+		Deployments: relevant,
+		Changes:     changes,
+		SLO:         sloResults,
+		Now:         now,
+	}
+	if e.Deps.Traces != nil && e.Deps.Traces.BaseURL != "" {
+		samples, err := e.Deps.Traces.Search(ctx, inc.Service, 10)
+		if err != nil {
+			e.traceState = "degraded"
+		} else {
+			e.traceState = "ok"
+			pack.Traces = samples
+		}
+	} else {
+		e.traceState = "not_configured"
+	}
+	if e.Deps.Logs != nil && e.Deps.Logs.BaseURL != "" {
+		lines, err := e.Deps.Logs.Search(ctx, inc.Service, 10)
+		if err != nil {
+			e.logState = "degraded"
+		} else {
+			e.logState = "ok"
+			pack.Logs = lines
+		}
+	} else {
+		e.logState = "not_configured"
+	}
+	analysis := rca.Analyze(pack)
+	matched := runbook.Match(e.Runbooks, *inc)
+	analysis.RecommendedActions = append(analysis.RecommendedActions, runbook.Actions(matched)...)
+	inc.Analysis = &analysis
+	inc.Summary = analysis.Summary
+	inc.SuspectedCauses = analysis.Hypotheses
+	inc.Evidence = analysis.Evidence
+	inc.RecommendedActions = analysis.RecommendedActions
+	if inc.Impact == "" {
+		inc.Impact = analysis.Impact
+	}
+}
+
+func (e *Engine) maybeRecover(ctx context.Context, inc domain.Incident, now time.Time) error {
+	if !incident.Open(inc.Status) {
+		return nil
+	}
+	faults, err := e.Store.ListFaults(ctx)
+	if err != nil {
+		return err
+	}
+	names := append([]string{inc.Service}, inc.RelatedServices...)
+	for _, f := range faults {
+		if f.Enabled && contains(names, f.Service) {
+			return nil
+		}
+	}
+	results, err := e.Store.LatestSLOResults(ctx, "")
+	if err != nil {
+		return err
+	}
+	defs, err := e.Store.ListSLOs(ctx)
+	if err != nil {
+		return err
+	}
+	compliance := map[string]bool{}
+	for _, def := range defs {
+		for _, w := range def.Windows {
+			if !operationalWindow(w) {
+				compliance[def.Service+"|"+def.Name+"|"+w.Name] = true
+			}
+		}
+	}
+	saw := false
+	for _, r := range results {
+		if !contains(names, r.Service) {
+			continue
+		}
+		if compliance[r.Service+"|"+r.SLO+"|"+r.Window] {
+			continue
+		}
+		saw = true
+		if r.Status == domain.SLOBreached || r.Status == domain.SLOAtRisk {
+			return nil
+		}
+	}
+	if !saw {
+		return nil
+	}
+	alerts, err := e.Store.ListAlerts(ctx, now.Add(-e.window()))
+	if err != nil {
+		return err
+	}
+	for _, a := range alerts {
+		if a.Status == "firing" && contains(names, a.Service) {
+			return nil
+		}
+	}
+	if err := incident.Transition(inc.Status, domain.StatusResolved); err != nil {
+		return nil
+	}
+	resolved := now
+	inc.Status = domain.StatusResolved
+	inc.ResolvedAt = &resolved
+	inc.UpdatedAt = now
+	inc.Events = append(inc.Events, domain.TimelineEntry{
+		ID: inc.ID + "-recovered", At: now, Kind: "recovery", Actor: "engine",
+		Message: "SLO windows are healthy, no firing alerts, and no active faults. Incident marked resolved.",
+	})
+	e.applyAnalysis(ctx, &inc, results, now)
+	return e.Store.SaveIncident(ctx, inc)
+}
+
+// AnalyzeIncident refreshes deterministic evidence and, when configured,
+// asks the AI provider to narrate it. Provider failure leaves the
+// deterministic analysis in place with ai_status=degraded.
+func (e *Engine) AnalyzeIncident(ctx context.Context, id, actor string) (domain.Incident, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	inc, err := e.Store.GetIncident(ctx, id)
+	if err != nil {
+		return domain.Incident{}, err
+	}
+	now := e.now()
+	results, err := e.Store.LatestSLOResults(ctx, "")
+	if err != nil {
+		return domain.Incident{}, err
+	}
+	e.applyAnalysis(ctx, &inc, results, now)
+	if inc.Analysis == nil {
+		return inc, e.Store.SaveIncident(ctx, inc)
+	}
+	inc.Events = append(inc.Events, domain.TimelineEntry{
+		ID: id + "-analysis-" + now.Format("150405.000"), At: now, Kind: "analysis", Actor: actor,
+		Message: "Deterministic analysis refreshed",
+	})
+	if e.AIEnabled && e.AI != nil {
+		pack := domain.EvidencePack{
+			Incident:        inc,
+			SLOStatus:       results,
+			Analysis:        inc.Analysis,
+			MetricSummaries: metricSummaries(results),
+		}
+		model, err := e.AI.Analyze(ctx, pack)
+		if err != nil {
+			degraded := ai.Degraded(*inc.Analysis, err)
+			inc.Analysis = &degraded
+			inc.Events = append(inc.Events, domain.TimelineEntry{
+				ID: id + "-ai-degraded", At: now, Kind: "ai", Actor: e.AI.Name(),
+				Message: "AI analysis degraded: " + err.Error(),
+			})
+		} else {
+			merged := ai.Merge(*inc.Analysis, model, e.AI.Name())
+			inc.Analysis = &merged
+			inc.Summary = merged.Summary
+			inc.SuspectedCauses = merged.Hypotheses
+			inc.Events = append(inc.Events, domain.TimelineEntry{
+				ID: id + "-ai", At: now, Kind: "ai", Actor: e.AI.Name(),
+				Message: "AI-assisted narrative attached. Evidence grades were not upgraded by the model.",
+			})
+		}
+	}
+	inc.UpdatedAt = now
+	if err := e.Store.SaveIncident(ctx, inc); err != nil {
+		return domain.Incident{}, err
+	}
+	_ = e.Store.AddAudit(ctx, domain.AuditEvent{
+		ID: "audit-" + id + "-" + now.Format("150405.000"), At: now, Actor: actor, Action: "incident.analyze",
+		Target: id, Reason: "analysis requested", AIGenerated: inc.Analysis != nil && inc.Analysis.AIStatus == "completed",
+	})
+	return inc, nil
+}
+
+func metricSummaries(results []domain.SLOResult) []string {
+	var out []string
+	for _, r := range results {
+		out = append(out, fmt.Sprintf("%s %s %s status=%s current=%.4f burn=%.2f", r.Service, r.SLO, r.Window, r.Status, r.Current, r.BurnRate))
+	}
+	return out
+}
+
+// operationalWindow reports whether a window describes current impact.
+// Windows longer than five minutes, including the 30 day compliance window,
+// are still evaluated and shown. They do not open or hold an incident.
+func operationalWindow(w domain.SLOWindow) bool {
+	if w.Duration <= 0 {
+		return !w.Compliance
+	}
+	return w.Duration <= 5*time.Minute
+}
+
+func (e *Engine) window() time.Duration {
+	if e.Window <= 0 {
+		return 5 * time.Minute
+	}
+	return e.Window
+}
+
+func (e *Engine) lookback() time.Duration {
+	if e.Lookback <= 0 {
+		return 30 * time.Minute
+	}
+	return e.Lookback
+}
+
+func primaryService(g correlation.Group) string {
+	counts := map[string]int{}
+	for _, s := range g.Signals {
+		counts[s.Service]++
+	}
+	best := g.Services[0]
+	for _, s := range g.Services {
+		if counts[s] > counts[best] {
+			best = s
+		}
+	}
+	return best
+}
+
+func severityFor(services []domain.Service, g correlation.Group, results []domain.SLOResult) string {
+	high := false
+	for _, name := range g.Services {
+		for _, s := range services {
+			if s.Name == name && (s.Criticality == "high" || s.Criticality == "critical") {
+				high = true
+			}
+		}
+	}
+	breached := false
+	for _, r := range results {
+		if contains(g.Services, r.Service) && r.Status == domain.SLOBreached {
+			breached = true
+		}
+	}
+	if breached && high && len(g.Services) > 1 {
+		return domain.SeveritySEV1
+	}
+	if breached && high {
+		return domain.SeveritySEV2
+	}
+	if breached {
+		return domain.SeveritySEV3
+	}
+	return domain.SeveritySEV4
+}
+
+func environmentFor(services []domain.Service, name string) string {
+	for _, s := range services {
+		if s.Name == name && s.Environment != "" {
+			return s.Environment
+		}
+	}
+	return "local"
+}
+
+func others(services []string, primary string) []string {
+	var out []string
+	for _, s := range services {
+		if s != primary {
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func timelineFromSignals(g correlation.Group, now time.Time) []domain.TimelineEntry {
+	var all []domain.Signal
+	all = append(all, g.Context...)
+	all = append(all, g.Signals...)
+	sort.Slice(all, func(i, j int) bool { return all[i].OccurredAt.Before(all[j].OccurredAt) })
+	var events []domain.TimelineEntry
+	for _, s := range all {
+		at := s.OccurredAt
+		if at.IsZero() {
+			at = now
+		}
+		events = append(events, domain.TimelineEntry{
+			ID: s.ID + "-tl", At: at, Kind: s.Type, Message: s.Summary, Actor: "engine",
+		})
+	}
+	return events
+}
+
+func overlaps(inc domain.Incident, services []string) bool {
+	names := append([]string{inc.Service}, inc.RelatedServices...)
+	for _, s := range services {
+		if contains(names, s) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFingerprint(signals []domain.Signal, fp string) bool {
+	for _, s := range signals {
+		if s.Fingerprint == fp {
+			return true
+		}
+	}
+	return false
+}
+
+func contains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func union(a, b []string) []string {
+	out := append([]string{}, a...)
+	for _, s := range b {
+		if !contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func orState(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
+}

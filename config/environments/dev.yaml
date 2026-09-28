@@ -1,0 +1,13 @@
+store: postgres
+demo:
+  enabled: true
+ai:
+  enabled: true
+  provider: mock
+remediation:
+  enabled: false
+  require_approval: true
+engine:
+  interval: 30s
+  correlation_window: 5m
+  deployment_lookback: 30m

@@ -1,0 +1,8 @@
+name: resource-pressure
+faults:
+  - cpu-pressure
+  - memory-pressure
+service: payment-service
+expected_telemetry:
+  - added latency on payment-service
+  - process work performed inside the charge handler

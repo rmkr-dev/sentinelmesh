@@ -1,0 +1,9 @@
+name: payment-service
+team: payments
+owner: payments-oncall
+criticality: high
+version: 1.8.1
+repository: github.com/rmkr-dev/sentinelmesh
+dependencies: []
+attributes:
+  tier: application

@@ -1,0 +1,12 @@
+# Copy to backend.tf only on the machine that should use remote state.
+# Do not commit backend.tf if it contains account-specific names you consider private,
+# and never commit terraform.tfstate.
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "REPLACE"
+    storage_account_name = "REPLACE"
+    container_name       = "tfstate"
+    key                  = "observability.tfstate"
+    use_oidc             = true
+  }
+}

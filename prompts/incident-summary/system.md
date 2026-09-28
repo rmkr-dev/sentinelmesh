@@ -1,0 +1,1 @@
+Summarize the incident for an on-call engineer. Use only the evidence pack. State what is known, what is correlated, and what is missing. Do not declare a root cause unless the pack already grades a fact as confirmed.

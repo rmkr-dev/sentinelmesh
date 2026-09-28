@@ -1,0 +1,20 @@
+id: inventory-service-dependency
+title: Inventory dependency or database failure
+service: inventory-service
+trigger:
+  signal_types: [slo, alert, trace]
+  metric: http_server_error_rate
+  threshold: 0.05
+steps:
+  - id: inspect_dependency_health
+    action: read
+    description: Check shop-postgres and the db spans on inventory-service.
+  - id: inspect_database_latency
+    action: read
+    description: Look for SELECT spans longer than the client timeout.
+  - id: inspect_error_traces
+    action: read
+    description: Confirm whether order-service failures are caused by inventory 5xx or timeouts.
+  - id: collect_recent_logs
+    action: read
+    description: Collect redacted inventory logs for the same trace ids.

@@ -1,0 +1,7 @@
+name: latency
+fault: payment-latency
+service: payment-service
+expected_telemetry:
+  - payment-service latency histogram moves above 500ms
+  - slow spans on POST /v1/charges
+expected_alert: PaymentHighLatency

@@ -1,0 +1,21 @@
+id: order-service-checkout
+title: Checkout failures on order-service
+service: order-service
+trigger:
+  signal_types: [slo, alert]
+  metric: http_server_error_rate
+  threshold: 0.05
+steps:
+  - id: inspect_recent_deployment
+    action: read
+    description: Check deployments of order-service and its dependencies.
+  - id: inspect_dependency_health
+    action: read
+    description: Compare payment-service and inventory-service SLIs before changing order-service.
+  - id: inspect_error_traces
+    action: read
+    description: Follow the checkout trace from the gateway through order, inventory, and payment.
+  - id: evaluate_rollback
+    action: recommend
+    description: Roll back only the service whose change correlates with the symptom, after approval.
+    remediation: rollback_deployment

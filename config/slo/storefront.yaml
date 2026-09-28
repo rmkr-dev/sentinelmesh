@@ -1,0 +1,5 @@
+service: storefront
+slos:
+  availability:
+    target: 99.5%
+    windows: [5m, 1h, 30d]
