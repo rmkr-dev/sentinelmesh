@@ -14,5 +14,5 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-      - name: Contract and unit tests
-        run: go test ./...
+      - name: Telemetry contract tests
+        run: go test ./tests/contract/

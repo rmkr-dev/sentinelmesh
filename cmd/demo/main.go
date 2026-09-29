@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,9 +10,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XSAM/otelsql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/rmkr-dev/sentinelmesh/internal/shop"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 func main() {
@@ -35,7 +37,10 @@ func main() {
 
 	var query func(context.Context, string, ...any) error
 	if dsn := os.Getenv("SHOP_DATABASE_URL"); dsn != "" && (name == "inventory-service" || name == "order-service") {
-		db, err := sql.Open("pgx", dsn)
+		db, err := otelsql.Open("pgx", dsn, otelsql.WithAttributes(
+			semconv.DBSystemPostgreSQL,
+			attribute.String("peer.service", "shop-postgres"),
+		))
 		if err != nil {
 			slog.Error("shop database", "error", err.Error())
 			os.Exit(1)
@@ -58,9 +63,12 @@ func main() {
 		Log:             tel.Logger,
 		Tracer:          otel.Tracer(name),
 		Duration:        tel.Duration,
+		Orders:          tel.Orders,
+		Charge:          tel.Charge,
 		Query:           query,
 		Poller: &shop.Poller{
 			URL:     os.Getenv("PLATFORM_URL"),
+			Token:   os.Getenv("PLATFORM_API_TOKEN"),
 			Service: name,
 			Log:     tel.Logger,
 		},

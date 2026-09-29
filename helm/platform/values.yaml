@@ -3,6 +3,8 @@ namespace: observability
 
 platform:
   image: sentinelmesh:local
+  imageRepository: ""
+  imageTag: "0.1.0"
   replicas: 1
   demo: false
   env: production
@@ -24,13 +26,18 @@ platform:
 
 collector:
   enabled: true
-  image: otel/opentelemetry-collector-contrib:0.136.0
+  image: otel/opentelemetry-collector-contrib:0.148.0
+  agent:
+    enabled: false
+  gateway:
+    enabled: false
   jaegerEndpoint: jaeger:4317
   lokiEndpoint: http://loki:3100/otlp
   azure:
     enabled: false
     # azure_auth use_default requires collector-contrib 0.148.0 or newer.
     image: otel/opentelemetry-collector-contrib:0.148.0
+    clientId: ""
     tracesEndpoint: ""
     logsEndpoint: ""
     metricsEndpoint: ""

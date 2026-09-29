@@ -8,12 +8,19 @@ import (
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
 )
 
+// Relater answers multi-hop topology questions. A nil relater keeps catalog behavior.
+type Relater interface {
+	Related(a, b string, maxHops int) (bool, []string)
+}
+
 // Options controls grouping. Dependencies are directed caller → callee edges,
 // matched in either direction so a database failure groups with its caller.
 type Options struct {
 	Window             time.Duration
 	DeploymentLookback time.Duration
 	Dependencies       map[string][]string
+	Graph              Relater
+	MaxHops            int
 }
 
 // Group is a correlated set of symptom signals plus context (deploys, faults).
@@ -92,7 +99,7 @@ func Correlate(signals []domain.Signal, opts Options) []Group {
 
 	for i := range groups {
 		for _, c := range context {
-			if !relatedService(c.Service, groups[i].Services, opts.Dependencies) {
+			if !relatedService(c.Service, groups[i].Services, opts) {
 				continue
 			}
 			delta := groups[i].Started.Sub(c.OccurredAt)
@@ -109,7 +116,7 @@ func belongs(g Group, s domain.Signal, opts Options) bool {
 	if s.OccurredAt.Sub(g.Ended) > opts.Window || g.Started.Sub(s.OccurredAt) > opts.Window {
 		return false
 	}
-	if relatedService(s.Service, g.Services, opts.Dependencies) {
+	if relatedService(s.Service, g.Services, opts) {
 		return true
 	}
 	trace := s.Attributes["trace_id"]
@@ -124,10 +131,19 @@ func belongs(g Group, s domain.Signal, opts Options) bool {
 	return false
 }
 
-func relatedService(service string, services []string, deps map[string][]string) bool {
+func relatedService(service string, services []string, opts Options) bool {
+	hops := opts.MaxHops
+	if hops <= 0 {
+		hops = 2
+	}
 	for _, other := range services {
-		if service == other || linked(service, other, deps) {
+		if service == other || linked(service, other, opts.Dependencies) {
 			return true
+		}
+		if opts.Graph != nil {
+			if ok, _ := opts.Graph.Related(other, service, hops); ok {
+				return true
+			}
 		}
 	}
 	return false

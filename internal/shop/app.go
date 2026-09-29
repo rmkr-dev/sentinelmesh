@@ -36,6 +36,7 @@ type Fault struct {
 // Poller caches active faults. A platform outage leaves the last snapshot in place.
 type Poller struct {
 	URL     string
+	Token   string
 	Service string
 	Client  *http.Client
 	Log     *slog.Logger
@@ -72,6 +73,9 @@ func (p *Poller) refresh(ctx context.Context) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.URL, "/")+"/api/v1/demo/faults", nil)
 	if err != nil {
 		return
+	}
+	if p.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.Token)
 	}
 	resp, err := p.Client.Do(req)
 	if err != nil {
@@ -122,6 +126,8 @@ type App struct {
 	Log             *slog.Logger
 	Tracer          trace.Tracer
 	Duration        metric.Float64Histogram
+	Orders          metric.Int64Counter
+	Charge          metric.Float64Histogram
 	Poller          *Poller
 	Client          *http.Client
 	Query           func(ctx context.Context, sql string, args ...any) error
@@ -403,6 +409,9 @@ func (a *App) charge(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.log(ctx, slog.LevelInfo, "charge approved", "order_id", body.OrderID, "amount_cents", body.Amount)
+	if a.Charge != nil && body.Amount > 0 {
+		a.Charge.Record(ctx, float64(body.Amount))
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "auth_code": "ok"})
 }
 
@@ -455,6 +464,9 @@ func (a *App) createOrder(w http.ResponseWriter, r *http.Request) {
 		_ = a.Query(ctx, "INSERT INTO orders (id, sku, qty) VALUES ($1, $2, $3)", orderID, body.SKU, body.Qty)
 	}
 	a.log(ctx, slog.LevelInfo, "order completed", "order_id", orderID, "sku", body.SKU)
+	if a.Orders != nil {
+		a.Orders.Add(ctx, 1, metric.WithAttributes(attribute.String("sku", body.SKU)))
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"order_id": orderID, "status": "paid", "sku": body.SKU, "qty": body.Qty})
 }
 

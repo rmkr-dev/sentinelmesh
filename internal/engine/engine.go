@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,17 +18,22 @@ import (
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
 	"github.com/rmkr-dev/sentinelmesh/internal/incident"
 	"github.com/rmkr-dev/sentinelmesh/internal/rca"
+	"github.com/rmkr-dev/sentinelmesh/internal/redaction"
 	"github.com/rmkr-dev/sentinelmesh/internal/runbook"
 	"github.com/rmkr-dev/sentinelmesh/internal/slo"
 	"github.com/rmkr-dev/sentinelmesh/internal/store"
 	"github.com/rmkr-dev/sentinelmesh/internal/telemetryquery"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Dependencies are the read-only telemetry backends. Any of them may be absent.
 type Dependencies struct {
 	Metrics telemetryquery.MetricQuery
-	Traces  *telemetryquery.JaegerClient
-	Logs    *telemetryquery.LokiClient
+	Traces  telemetryquery.TraceSearcher
+	Logs    telemetryquery.LogSearcher
 }
 
 // Engine is the SRE control loop.
@@ -42,8 +48,14 @@ type Engine struct {
 	Now         func() time.Time
 	AI          ai.Provider
 	AIEnabled   bool
+	Redaction   redaction.Policy
+	Retention   time.Duration
+	Graph       correlation.Relater
+	MaxHops     int
+	Cluster     ClusterSource
 
 	mu          sync.Mutex
+	lastK8s     []domain.K8sEvent
 	metricState string
 	traceState  string
 	logState    string
@@ -83,6 +95,19 @@ func (e *Engine) log() *slog.Logger {
 
 // Tick evaluates the catalog once.
 func (e *Engine) Tick(ctx context.Context) error {
+	ctx, span := otel.Tracer("sentinelmesh").Start(ctx, "engine.tick")
+	defer span.End()
+	start := time.Now()
+	err := e.tick(ctx)
+	e.recordTick(ctx, time.Since(start), err)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
+	}
+	return err
+}
+
+func (e *Engine) tick(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := e.now()
@@ -98,9 +123,27 @@ func (e *Engine) Tick(ctx context.Context) error {
 	anomalySignals := e.detectAnomalies(ctx, services, now)
 	alertSignals := e.alertSignals(ctx, now)
 	contextSignals := e.contextSignals(ctx, now)
+	var k8sSignals []domain.Signal
+	if e.Cluster != nil {
+		signals, events, changes, err := e.Cluster.Collect(ctx, now)
+		if err != nil {
+			e.log().Warn("kubernetes collect", "error", err.Error())
+		} else {
+			k8sSignals = signals
+			e.lastK8s = events
+			for _, ch := range changes {
+				contextSignals = append(contextSignals, domain.Signal{
+					ID: ch.ID, Type: domain.SignalChange, Service: ch.Target, Summary: ch.Kind + " " + ch.Target,
+					Fingerprint: "change|" + ch.ID, OccurredAt: ch.OccurredAt,
+					Attributes: ch.Attributes,
+				})
+			}
+		}
+	}
 
 	symptoms := append(append([]domain.Signal{}, sloSignals...), anomalySignals...)
 	symptoms = append(symptoms, alertSignals...)
+	symptoms = append(symptoms, k8sSignals...)
 	all := append(symptoms, contextSignals...)
 
 	deps := map[string][]string{}
@@ -111,6 +154,8 @@ func (e *Engine) Tick(ctx context.Context) error {
 		Window:             e.window(),
 		DeploymentLookback: e.lookback(),
 		Dependencies:       deps,
+		Graph:              e.Graph,
+		MaxHops:            e.MaxHops,
 	})
 	open, err := e.Store.ListIncidents(ctx, store.IncidentFilter{})
 	if err != nil {
@@ -130,7 +175,39 @@ func (e *Engine) Tick(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := e.sweep(ctx, now); err != nil {
+		e.log().Warn("retention sweep failed", "error", err.Error())
+	}
 	return nil
+}
+
+func (e *Engine) recordTick(ctx context.Context, d time.Duration, err error) {
+	meter := otel.Meter("sentinelmesh")
+	hist, herr := meter.Float64Histogram("sentinelmesh.engine.tick.duration", metric.WithUnit("s"))
+	if herr == nil {
+		hist.Record(ctx, d.Seconds())
+	}
+	counter, cerr := meter.Int64Counter("sentinelmesh.engine.tick.errors")
+	if cerr == nil && err != nil {
+		counter.Add(ctx, 1)
+	}
+	_ = attribute.String("component", "engine")
+}
+
+func (e *Engine) sweep(ctx context.Context, now time.Time) error {
+	keep := e.retention()
+	before := now.Add(-keep)
+	if err := e.Store.DeleteAnomaliesBefore(ctx, before); err != nil {
+		return err
+	}
+	return e.Store.DeleteAlertsBefore(ctx, before)
+}
+
+func (e *Engine) retention() time.Duration {
+	if e.Retention <= 0 {
+		return 7 * 24 * time.Hour
+	}
+	return e.Retention
 }
 
 func (e *Engine) evaluateSLOs(ctx context.Context, defs []domain.SLODefinition, now time.Time) ([]domain.SLOResult, []domain.Signal) {
@@ -256,8 +333,8 @@ func (e *Engine) detectAnomalies(ctx context.Context, services []domain.Service,
 				continue
 			}
 			for _, a := range found {
-				a.ID = fmt.Sprintf("%s-%s-%d", a.Service, a.Detector, a.DetectedAt.UnixNano())
 				a.DetectedAt = now
+				a.ID = anomaly.StableID(a.Service, a.Detector, a.Metric, now)
 				_ = e.Store.SaveAnomaly(ctx, a)
 				signals = append(signals, domain.Signal{
 					ID:          a.ID,
@@ -433,10 +510,14 @@ func (e *Engine) applyAnalysis(ctx context.Context, inc *domain.Incident, result
 		Deployments: relevant,
 		Changes:     changes,
 		SLO:         sloResults,
+		K8s:         e.k8sFor(inc),
 		Now:         now,
 	}
-	if e.Deps.Traces != nil && e.Deps.Traces.BaseURL != "" {
-		samples, err := e.Deps.Traces.Search(ctx, inc.Service, 10)
+	from, to := e.evidenceWindow(*inc, now)
+	if e.Deps.Traces != nil {
+		samples, err := e.Deps.Traces.SearchTraces(ctx, telemetryquery.TraceQuery{
+			Service: inc.Service, Start: from, End: to, Limit: 10,
+		})
 		if err != nil {
 			e.traceState = "degraded"
 		} else {
@@ -446,8 +527,10 @@ func (e *Engine) applyAnalysis(ctx context.Context, inc *domain.Incident, result
 	} else {
 		e.traceState = "not_configured"
 	}
-	if e.Deps.Logs != nil && e.Deps.Logs.BaseURL != "" {
-		lines, err := e.Deps.Logs.Search(ctx, inc.Service, 10)
+	if e.Deps.Logs != nil {
+		lines, err := e.Deps.Logs.SearchLogs(ctx, telemetryquery.LogQuery{
+			Service: inc.Service, Start: from, End: to, Limit: 10,
+		})
 		if err != nil {
 			e.logState = "degraded"
 		} else {
@@ -457,6 +540,8 @@ func (e *Engine) applyAnalysis(ctx context.Context, inc *domain.Incident, result
 	} else {
 		e.logState = "not_configured"
 	}
+	e.redactPack(&pack)
+	e.redactSignals(inc)
 	analysis := rca.Analyze(pack)
 	matched := runbook.Match(e.Runbooks, *inc)
 	analysis.RecommendedActions = append(analysis.RecommendedActions, runbook.Actions(matched)...)
@@ -570,6 +655,7 @@ func (e *Engine) AnalyzeIncident(ctx context.Context, id, actor string) (domain.
 			Analysis:        inc.Analysis,
 			MetricSummaries: metricSummaries(results),
 		}
+		e.redactEvidence(&pack)
 		model, err := e.AI.Analyze(ctx, pack)
 		if err != nil {
 			degraded := ai.Degraded(*inc.Analysis, err)
@@ -611,6 +697,88 @@ func metricSummaries(results []domain.SLOResult) []string {
 // operationalWindow reports whether a window describes current impact.
 // Windows longer than five minutes, including the 30 day compliance window,
 // are still evaluated and shown. They do not open or hold an incident.
+// ClusterSource is the read-only Kubernetes adapter.
+type ClusterSource interface {
+	Collect(ctx context.Context, now time.Time) ([]domain.Signal, []domain.K8sEvent, []domain.Change, error)
+}
+
+func (e *Engine) k8sFor(inc *domain.Incident) []domain.K8sEvent {
+	if len(e.lastK8s) == 0 {
+		return nil
+	}
+	names := append([]string{inc.Service}, inc.RelatedServices...)
+	var out []domain.K8sEvent
+	for _, ev := range e.lastK8s {
+		if contains(names, ev.Object) || contains(names, ev.Namespace) || strings.Contains(ev.Object, inc.Service) {
+			out = append(out, ev)
+		}
+	}
+	if len(out) == 0 {
+		return e.lastK8s
+	}
+	return out
+}
+
+func (e *Engine) evidenceWindow(inc domain.Incident, now time.Time) (time.Time, time.Time) {
+	from := now.Add(-e.lookback())
+	if !inc.StartedAt.IsZero() {
+		earlier := inc.StartedAt.Add(-e.lookback())
+		if earlier.Before(from) {
+			from = earlier
+		}
+	}
+	return from, now
+}
+
+func (e *Engine) policy() redaction.Policy {
+	if len(e.Redaction.Headers) == 0 && len(e.Redaction.JSONFields) == 0 {
+		return redaction.DefaultPolicy()
+	}
+	return e.Redaction
+}
+
+func (e *Engine) redactPack(pack *rca.Pack) {
+	policy := e.policy()
+	for i := range pack.Logs {
+		pack.Logs[i].Body = redaction.RedactString(policy, pack.Logs[i].Body)
+		pack.Logs[i].Attributes = redaction.RedactAttributes(policy, pack.Logs[i].Attributes)
+	}
+	for i := range pack.Traces {
+		pack.Traces[i].Error = redaction.RedactString(policy, pack.Traces[i].Error)
+		pack.Traces[i].Operation = redaction.RedactString(policy, pack.Traces[i].Operation)
+	}
+	for i := range pack.Changes {
+		pack.Changes[i].Summary = redaction.RedactString(policy, pack.Changes[i].Summary)
+		pack.Changes[i].Attributes = redaction.RedactAttributes(policy, pack.Changes[i].Attributes)
+	}
+}
+
+func (e *Engine) redactEvidence(pack *domain.EvidencePack) {
+	policy := e.policy()
+	pack.Incident.Summary = redaction.RedactString(policy, pack.Incident.Summary)
+	pack.Incident.Impact = redaction.RedactString(policy, pack.Incident.Impact)
+	e.redactSignals(&pack.Incident)
+	if pack.Analysis == nil {
+		return
+	}
+	pack.Analysis.Summary = redaction.RedactString(policy, pack.Analysis.Summary)
+	pack.Analysis.Impact = redaction.RedactString(policy, pack.Analysis.Impact)
+	for i := range pack.Analysis.Evidence {
+		pack.Analysis.Evidence[i].Summary = redaction.RedactString(policy, pack.Analysis.Evidence[i].Summary)
+	}
+	for i := range pack.Analysis.Hypotheses {
+		pack.Analysis.Hypotheses[i].Statement = redaction.RedactString(policy, pack.Analysis.Hypotheses[i].Statement)
+	}
+}
+
+func (e *Engine) redactSignals(inc *domain.Incident) {
+	policy := e.policy()
+	for i := range inc.Signals {
+		inc.Signals[i].Summary = redaction.RedactString(policy, inc.Signals[i].Summary)
+		inc.Signals[i].Attributes = redaction.RedactAttributes(policy, inc.Signals[i].Attributes)
+	}
+}
+
 func operationalWindow(w domain.SLOWindow) bool {
 	if w.Duration <= 0 {
 		return !w.Compliance

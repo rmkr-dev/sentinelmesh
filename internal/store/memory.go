@@ -24,6 +24,12 @@ type Memory struct {
 	faults       map[string]domain.Fault
 	alerts       []domain.Alert
 	remediations map[string]domain.RemediationRequest
+	resources    []domain.Resource
+	edges        []domain.TopologyEdge
+	changes      []domain.Change
+	health       []domain.HealthEvent
+	silences     []domain.Silence
+	maintenance  []domain.MaintenanceWindow
 	seqYear      int
 	seq          int
 }
@@ -211,7 +217,41 @@ func (m *Memory) ListIncidents(_ context.Context, filter IncidentFilter) ([]doma
 func (m *Memory) SaveAnomaly(_ context.Context, a domain.Anomaly) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for i := range m.anomalies {
+		if m.anomalies[i].ID == a.ID {
+			m.anomalies[i] = clone(a)
+			return nil
+		}
+	}
 	m.anomalies = append(m.anomalies, clone(a))
+	return nil
+}
+
+func (m *Memory) DeleteAnomaliesBefore(_ context.Context, before time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept := make([]domain.Anomaly, 0, len(m.anomalies))
+	for _, a := range m.anomalies {
+		if a.DetectedAt.Before(before) {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	m.anomalies = kept
+	return nil
+}
+
+func (m *Memory) DeleteAlertsBefore(_ context.Context, before time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept := make([]domain.Alert, 0, len(m.alerts))
+	for _, a := range m.alerts {
+		if a.StartsAt.Before(before) {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	m.alerts = kept
 	return nil
 }
 

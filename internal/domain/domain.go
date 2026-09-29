@@ -29,15 +29,17 @@ const (
 	SLOBreached = "breached"
 	SLONoData   = "no_data"
 
-	SignalAlert      = "alert"
-	SignalAnomaly    = "anomaly"
-	SignalSLO        = "slo"
-	SignalTrace      = "trace"
-	SignalLog        = "log"
-	SignalK8s        = "k8s"
-	SignalDeployment = "deployment"
-	SignalFault      = "fault"
-	SignalChange     = "change"
+	SignalAlert          = "alert"
+	SignalAnomaly        = "anomaly"
+	SignalSLO            = "slo"
+	SignalTrace          = "trace"
+	SignalLog            = "log"
+	SignalK8s            = "k8s"
+	SignalDeployment     = "deployment"
+	SignalFault          = "fault"
+	SignalChange         = "change"
+	SignalResourceHealth = "resource_health"
+	SignalPlatform       = "platform"
 )
 
 // Service is a catalog entry. Names are stable identifiers, not cloud resource IDs.
@@ -146,6 +148,8 @@ type Hypothesis struct {
 	Grade       string   `json:"grade"`
 	EvidenceIDs []string `json:"evidence_ids"`
 	AIGenerated bool     `json:"ai_generated"`
+	Score       float64  `json:"score,omitempty"`
+	Rationale   string   `json:"rationale,omitempty"`
 }
 
 // RecommendedAction is advice. It is not an execution request.
@@ -198,7 +202,102 @@ type Incident struct {
 	HumanNotes         string              `json:"human_notes,omitempty"`
 	Impact             string              `json:"impact,omitempty"`
 	RelatedServices    []string            `json:"related_services,omitempty"`
+	Tenant             string              `json:"tenant,omitempty"`
 	UpdatedAt          time.Time           `json:"updated_at"`
+}
+
+// Resource is a cloud or cluster object bound to a catalog service.
+type Resource struct {
+	ID         string            `json:"id"`
+	Kind       string            `json:"kind"`
+	Provider   string            `json:"provider"`
+	Name       string            `json:"name"`
+	Region     string            `json:"region,omitempty"`
+	Tenant     string            `json:"tenant,omitempty"`
+	Service    string            `json:"service,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+	UpdatedAt  time.Time         `json:"updated_at"`
+}
+
+// TopologyNode is one vertex in the service and infrastructure graph.
+type TopologyNode struct {
+	ID         string            `json:"id"`
+	Kind       string            `json:"kind"`
+	Name       string            `json:"name"`
+	Service    string            `json:"service,omitempty"`
+	Status     string            `json:"status,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// TopologyEdge extends a dependency edge with provenance.
+type TopologyEdge struct {
+	From       string    `json:"from"`
+	To         string    `json:"to"`
+	Kind       string    `json:"kind"`
+	Source     string    `json:"source"`
+	Status     string    `json:"status,omitempty"`
+	Detail     string    `json:"detail,omitempty"`
+	Confidence float64   `json:"confidence"`
+	LastSeen   time.Time `json:"last_seen"`
+}
+
+// Change is a control-plane or deployment change. It is context, not a cause by itself.
+type Change struct {
+	ID         string            `json:"id"`
+	Kind       string            `json:"kind"`
+	Source     string            `json:"source"`
+	Target     string            `json:"target"`
+	Actor      string            `json:"actor,omitempty"`
+	Tenant     string            `json:"tenant,omitempty"`
+	OccurredAt time.Time         `json:"occurred_at"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// HealthEvent is a platform health fact from Resource Health or Service Health.
+type HealthEvent struct {
+	Resource string    `json:"resource"`
+	State    string    `json:"state"`
+	Reason   string    `json:"reason,omitempty"`
+	Source   string    `json:"source"`
+	Tenant   string    `json:"tenant,omitempty"`
+	At       time.Time `json:"at"`
+}
+
+// Silence suppresses new incidents that match its labels until it expires.
+type Silence struct {
+	ID        string            `json:"id"`
+	Tenant    string            `json:"tenant,omitempty"`
+	Owner     string            `json:"owner"`
+	Reason    string            `json:"reason"`
+	Matchers  map[string]string `json:"matchers"`
+	StartsAt  time.Time         `json:"starts_at"`
+	EndsAt    time.Time         `json:"ends_at"`
+	CreatedAt time.Time         `json:"created_at"`
+}
+
+// MaintenanceWindow is a planned suppression window.
+type MaintenanceWindow struct {
+	ID       string            `json:"id"`
+	Tenant   string            `json:"tenant,omitempty"`
+	Owner    string            `json:"owner"`
+	Reason   string            `json:"reason"`
+	Matchers map[string]string `json:"matchers"`
+	StartsAt time.Time         `json:"starts_at"`
+	EndsAt   time.Time         `json:"ends_at"`
+}
+
+// Tenant is an isolation boundary. The default tenant is "default".
+type Tenant struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Principal is an authenticated caller.
+type Principal struct {
+	Subject string   `json:"subject"`
+	Name    string   `json:"name"`
+	Tenant  string   `json:"tenant"`
+	Roles   []string `json:"roles"`
 }
 
 // Anomaly is a detector finding. Detector names are statistical methods, not model brands.

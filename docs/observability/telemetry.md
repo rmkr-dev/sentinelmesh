@@ -12,4 +12,4 @@ Spans are server spans from `otelhttp` plus client spans on outbound calls. Inve
 
 Logs are JSON through the OpenTelemetry slog bridge and include `trace_id` when a span is active.
 
-Redaction runs twice: the collector drops secret-like attribute keys, and `internal/redaction` scrubs anything the platform would persist or send to a model. Tests cover authorization headers, cookies, `card_token`, query parameter `token`, email addresses, and AWS-style access key ids.
+Redaction runs in the collector and again in the platform. `internal/engine` scrubs log bodies, trace errors, and signal attributes before `SaveIncident` and before `ai.Provider.Analyze`. The alert webhook and event ingest apply the same policy. `telemetry.header_denylist`, `query_denylist`, and `redact_emails` in `config/base.yaml` build that policy. Tests cover bearer tokens, email addresses, and `card_token`.

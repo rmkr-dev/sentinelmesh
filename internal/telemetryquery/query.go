@@ -289,6 +289,34 @@ func scalar(v []any) (float64, bool) {
 	return n, true
 }
 
+// TraceQuery bounds a trace search to a service and a time window.
+type TraceQuery struct {
+	Service string
+	Start   time.Time
+	End     time.Time
+	Limit   int
+	TraceID string
+}
+
+// LogQuery bounds a log search to a service and a time window.
+type LogQuery struct {
+	Service string
+	Start   time.Time
+	End     time.Time
+	Limit   int
+	TraceID string
+}
+
+// TraceSearcher reads trace summaries from a backend.
+type TraceSearcher interface {
+	SearchTraces(ctx context.Context, q TraceQuery) ([]domain.TraceSample, error)
+}
+
+// LogSearcher reads log excerpts from a backend.
+type LogSearcher interface {
+	SearchLogs(ctx context.Context, q LogQuery) ([]domain.LogExcerpt, error)
+}
+
 // JaegerClient reads trace summaries.
 type JaegerClient struct {
 	BaseURL string
@@ -302,22 +330,41 @@ func (j JaegerClient) client() *http.Client {
 	return &http.Client{Timeout: 10 * time.Second}
 }
 
-// Search returns recent traces for a service.
+// Search returns traces from the last hour. Callers that know an incident window use SearchTraces.
 func (j JaegerClient) Search(ctx context.Context, service string, limit int) ([]domain.TraceSample, error) {
+	end := time.Now().UTC()
+	return j.SearchTraces(ctx, TraceQuery{Service: service, Start: end.Add(-time.Hour), End: end, Limit: limit})
+}
+
+// SearchTraces returns traces inside the query window.
+func (j JaegerClient) SearchTraces(ctx context.Context, query TraceQuery) ([]domain.TraceSample, error) {
 	if j.BaseURL == "" {
 		return nil, fmt.Errorf("jaeger url is empty")
 	}
+	limit := query.Limit
 	if limit <= 0 {
 		limit = 20
+	}
+	end := query.End
+	if end.IsZero() {
+		end = time.Now().UTC()
+	}
+	start := query.Start
+	if start.IsZero() {
+		start = end.Add(-time.Hour)
 	}
 	u, err := url.Parse(j.BaseURL + "/api/traces")
 	if err != nil {
 		return nil, err
 	}
 	q := u.Query()
-	q.Set("service", service)
+	q.Set("service", query.Service)
 	q.Set("limit", strconv.Itoa(limit))
-	q.Set("lookback", "1h")
+	q.Set("start", strconv.FormatInt(start.UnixMicro(), 10))
+	q.Set("end", strconv.FormatInt(end.UnixMicro(), 10))
+	if query.TraceID != "" {
+		q.Set("traceID", query.TraceID)
+	}
 	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -383,7 +430,7 @@ func (j JaegerClient) Search(ctx context.Context, service string, limit int) ([]
 				peer = fmt.Sprint(tag.Value)
 			}
 		}
-		svc := service
+		svc := query.Service
 		if p, ok := tr.Processes[root.ProcessID]; ok && p.ServiceName != "" {
 			svc = p.ServiceName
 		}
@@ -414,21 +461,42 @@ func (l LokiClient) client() *http.Client {
 	return &http.Client{Timeout: 10 * time.Second}
 }
 
-// Search returns recent log lines for a service label.
+// Search returns log lines from the last hour.
 func (l LokiClient) Search(ctx context.Context, service string, limit int) ([]domain.LogExcerpt, error) {
+	end := time.Now().UTC()
+	return l.SearchLogs(ctx, LogQuery{Service: service, Start: end.Add(-time.Hour), End: end, Limit: limit})
+}
+
+// SearchLogs returns log lines inside the query window.
+func (l LokiClient) SearchLogs(ctx context.Context, query LogQuery) ([]domain.LogExcerpt, error) {
 	if l.BaseURL == "" {
 		return nil, fmt.Errorf("loki url is empty")
 	}
+	limit := query.Limit
 	if limit <= 0 {
 		limit = 20
+	}
+	end := query.End
+	if end.IsZero() {
+		end = time.Now().UTC()
+	}
+	start := query.Start
+	if start.IsZero() {
+		start = end.Add(-time.Hour)
 	}
 	u, err := url.Parse(l.BaseURL + "/loki/api/v1/query_range")
 	if err != nil {
 		return nil, err
 	}
+	selector := fmt.Sprintf(`{service_name=%q}`, query.Service)
+	if query.TraceID != "" {
+		selector = fmt.Sprintf(`{service_name=%q} |= %q`, query.Service, query.TraceID)
+	}
 	q := u.Query()
-	q.Set("query", fmt.Sprintf(`{service_name=%q}`, service))
+	q.Set("query", selector)
 	q.Set("limit", strconv.Itoa(limit))
+	q.Set("start", strconv.FormatInt(start.UnixNano(), 10))
+	q.Set("end", strconv.FormatInt(end.UnixNano(), 10))
 	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -466,7 +534,7 @@ func (l LokiClient) Search(ctx context.Context, service string, limit int) ([]do
 			ns, _ := strconv.ParseInt(row[0], 10, 64)
 			out = append(out, domain.LogExcerpt{
 				Timestamp: time.Unix(0, ns).UTC(),
-				Service:   service,
+				Service:   query.Service,
 				Severity:  stream.Stream["severity"],
 				Body:      row[1],
 				TraceID:   stream.Stream["trace_id"],

@@ -1,8 +1,27 @@
 const $ = (id) => document.getElementById(id);
+
+function escapeHTML(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[ch]));
+}
 let selected = null;
 
+function authHeaders(extra) {
+  const headers = Object.assign({}, extra || {});
+  const token = sessionStorage.getItem("platformToken");
+  if (token) headers.Authorization = "Bearer " + token;
+  return headers;
+}
+
 async function api(path, options) {
-  const res = await fetch(path, options);
+  const opts = Object.assign({}, options || {});
+  opts.headers = authHeaders(opts.headers);
+  const res = await fetch(path, opts);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || res.statusText);
@@ -13,8 +32,20 @@ async function api(path, options) {
 }
 
 function badge(text) {
-  const safe = String(text || "unknown");
+  const safe = escapeHTML(text || "unknown");
   return `<span class="badge ${safe}">${safe}</span>`;
+}
+
+function bindToken() {
+  const input = $("token");
+  if (!input) return;
+  input.value = sessionStorage.getItem("platformToken") || "";
+  input.addEventListener("change", () => {
+    const value = input.value.trim();
+    if (value) sessionStorage.setItem("platformToken", value);
+    else sessionStorage.removeItem("platformToken");
+    refresh().catch((err) => console.error(err));
+  });
 }
 
 async function loadMeta() {
@@ -26,7 +57,7 @@ async function loadMeta() {
 async function loadSLOs() {
   const data = await api("/api/v1/slos");
   const rows = (data.results || []).map((r) => `<tr>
-    <td>${r.service}</td><td>${r.slo}</td><td>${r.window}</td>
+    <td>${escapeHTML(r.service)}</td><td>${escapeHTML(r.slo)}</td><td>${escapeHTML(r.window)}</td>
     <td>${Number(r.current).toFixed(3)}%</td><td>${r.target}%</td>
     <td>${Number(r.burn_rate).toFixed(2)}</td>
     <td>${Number(r.error_budget_remaining).toFixed(1)}%</td>
@@ -38,8 +69,8 @@ async function loadIncidents() {
   const data = await api("/api/v1/incidents");
   const items = data.incidents || [];
   $("incidents").innerHTML = items.map((inc) => `<button class="incident" data-id="${inc.incident_id}">
-    <strong>${inc.incident_id}</strong> ${badge(inc.severity)} ${badge(inc.status)}<br/>
-    <span class="muted">${inc.service} — ${inc.title}</span>
+    <strong>${escapeHTML(inc.incident_id)}</strong> ${badge(inc.severity)} ${badge(inc.status)}<br/>
+    <span class="muted">${escapeHTML(inc.service)} — ${escapeHTML(inc.title)}</span>
   </button>`).join("") || "<p class='muted'>No incidents.</p>";
   for (const button of $("incidents").querySelectorAll("button")) {
     button.onclick = () => show(button.dataset.id);
@@ -72,9 +103,9 @@ async function show(id) {
   const ai = inc.analysis ? inc.analysis.ai_status : "not_requested";
   $("grades").innerHTML = `${badge(inc.severity)} ${badge(inc.status)} ${badge(label)} <span class="muted">AI ${ai}</span>`;
   $("summary").textContent = inc.summary || "No summary recorded.";
-  $("timeline").innerHTML = (inc.events || []).map((e) => `<li><code>${e.at}</code> ${e.kind} — ${e.message}</li>`).join("");
-  $("hypotheses").innerHTML = ((inc.analysis && inc.analysis.hypotheses) || []).map((h) => `<p>${badge(h.grade)} ${h.ai_generated ? badge("ai_generated") : ""} ${h.statement}</p>`).join("") || "<p class='muted'>No hypotheses.</p>";
-  $("evidence").innerHTML = ((inc.analysis && inc.analysis.evidence) || []).map((e) => `<li>${badge(e.grade)} <strong>${e.kind}</strong> ${e.summary}</li>`).join("") || "<li>No evidence.</li>";
+  $("timeline").innerHTML = (inc.events || []).map((e) => `<li><code>${escapeHTML(e.at)}</code> ${escapeHTML(e.kind)} — ${escapeHTML(e.message)}</li>`).join("");
+  $("hypotheses").innerHTML = ((inc.analysis && inc.analysis.hypotheses) || []).map((h) => `<p>${badge(h.grade)} ${h.ai_generated ? badge("ai_generated") : ""} ${escapeHTML(h.statement)} <span class="muted">${escapeHTML(h.rationale || "")}</span></p>`).join("") || "<p class='muted'>No hypotheses.</p>";
+  $("evidence").innerHTML = ((inc.analysis && inc.analysis.evidence) || []).map((e) => `<li>${badge(e.grade)} <strong>${escapeHTML(e.kind)}</strong> ${escapeHTML(e.summary)}</li>`).join("") || "<li>No evidence.</li>";
   $("postmortem-body").textContent = "";
 }
 
@@ -93,6 +124,7 @@ async function refresh() {
   if (selected) await show(selected);
 }
 
+bindToken();
 loadMeta().catch(() => {});
 refresh().catch((err) => {
   $("slos").textContent = err.message;

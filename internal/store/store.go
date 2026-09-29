@@ -42,6 +42,8 @@ type Store interface {
 
 	SaveAnomaly(ctx context.Context, a domain.Anomaly) error
 	ListAnomalies(ctx context.Context, since time.Time, limit int) ([]domain.Anomaly, error)
+	DeleteAnomaliesBefore(ctx context.Context, before time.Time) error
+	DeleteAlertsBefore(ctx context.Context, before time.Time) error
 
 	AddAudit(ctx context.Context, ev domain.AuditEvent) error
 	ListAudit(ctx context.Context, limit int) ([]domain.AuditEvent, error)
@@ -56,4 +58,17 @@ type Store interface {
 	SaveRemediation(ctx context.Context, r domain.RemediationRequest) error
 	GetRemediation(ctx context.Context, id string) (domain.RemediationRequest, error)
 	ListRemediations(ctx context.Context, incidentID string) ([]domain.RemediationRequest, error)
+
+	SaveResource(ctx context.Context, r domain.Resource) error
+	ListResources(ctx context.Context, kind, service string) ([]domain.Resource, error)
+	SaveEdge(ctx context.Context, e domain.TopologyEdge) error
+	ListEdges(ctx context.Context) ([]domain.TopologyEdge, error)
+	SaveChange(ctx context.Context, c domain.Change) error
+	ListChanges(ctx context.Context, since time.Time) ([]domain.Change, error)
+	SaveHealth(ctx context.Context, h domain.HealthEvent) error
+	ListHealth(ctx context.Context, since time.Time) ([]domain.HealthEvent, error)
+	SaveSilence(ctx context.Context, s domain.Silence) error
+	ListSilences(ctx context.Context) ([]domain.Silence, error)
+	SaveMaintenance(ctx context.Context, w domain.MaintenanceWindow) error
+	ListMaintenance(ctx context.Context) ([]domain.MaintenanceWindow, error)
 }

@@ -5,7 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"fmt"
+	"strings"
+
+	"github.com/rmkr-dev/sentinelmesh/internal/anomaly"
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
+	"github.com/rmkr-dev/sentinelmesh/internal/redaction"
 	"github.com/rmkr-dev/sentinelmesh/internal/store"
 	"github.com/rmkr-dev/sentinelmesh/internal/telemetryquery"
 )
@@ -22,6 +27,16 @@ func (s scripted) Instant(_ context.Context, q string) (float64, bool, error) {
 
 func (s scripted) Vector(context.Context, string) ([]telemetryquery.Sample, error) {
 	return nil, nil
+}
+
+type staticLogs struct {
+	lines []domain.LogExcerpt
+	query telemetryquery.LogQuery
+}
+
+func (s *staticLogs) SearchLogs(_ context.Context, q telemetryquery.LogQuery) ([]domain.LogExcerpt, error) {
+	s.query = q
+	return s.lines, nil
 }
 
 func (s scripted) Range(_ context.Context, q string, _, _ time.Time, _ time.Duration) ([]domain.MetricPoint, error) {
@@ -204,4 +219,102 @@ func TestLongWindowDoesNotHoldIncident(t *testing.T) {
 	if len(again) != 1 {
 		t.Fatalf("long window opened another incident: %d", len(again))
 	}
+}
+
+func TestEvidenceIsRedactedBeforeStoreAndAI(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	_ = st.UpsertService(ctx, domain.Service{Name: "payment-service", Criticality: "high", Environment: "local"})
+	_ = st.UpsertSLO(ctx, domain.SLODefinition{
+		ID: "payment-service:availability", Service: "payment-service", Name: "availability", Objective: 99.9, Indicator: "availability",
+		Windows: []domain.SLOWindow{{Name: "5m", Duration: 5 * time.Minute}},
+	})
+	conv := telemetryquery.Conventions{}
+	logs := &staticLogs{lines: []domain.LogExcerpt{{
+		Service: "payment-service",
+		Body:    "charge failed Bearer super-secret-token user@example.com card_token=tok_live_4242",
+	}}}
+	spy := &captureAI{}
+	eng := &Engine{
+		Store: st,
+		Deps: Dependencies{
+			Metrics: scripted{instant: map[string]float64{
+				conv.TotalQuery("payment-service", "5m"): 10,
+				conv.BadQuery("payment-service", "5m"):   4,
+			}},
+			Logs: logs,
+		},
+		Now:       func() time.Time { return now },
+		AI:        spy,
+		AIEnabled: true,
+		Redaction: redaction.DefaultPolicy(),
+		Lookback:  30 * time.Minute,
+	}
+	if err := eng.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := st.ListIncidents(ctx, store.IncidentFilter{})
+	if len(list) != 1 {
+		t.Fatalf("incidents=%d", len(list))
+	}
+	raw := fmt.Sprint(list[0])
+	for _, secret := range []string{"super-secret-token", "user@example.com", "tok_live_4242"} {
+		if strings.Contains(raw, secret) {
+			t.Fatalf("stored incident contains %s", secret)
+		}
+	}
+	got, err := eng.AnalyzeIncident(ctx, list[0].ID, "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spy.pack == nil {
+		t.Fatal("ai was not called")
+	}
+	aiRaw := fmt.Sprint(*spy.pack)
+	for _, secret := range []string{"super-secret-token", "user@example.com", "tok_live_4242"} {
+		if strings.Contains(aiRaw, secret) || strings.Contains(fmt.Sprint(got), secret) {
+			t.Fatalf("ai pack contains %s", secret)
+		}
+	}
+	if logs.query.Start.IsZero() || !logs.query.End.Equal(now) {
+		t.Fatalf("log query was not bounded: %+v", logs.query)
+	}
+}
+
+func TestAnomalyIDIsStableWithinAMinute(t *testing.T) {
+	now := time.Date(2026, 9, 29, 12, 1, 30, 0, time.UTC)
+	a := anomaly.StableID("payment-service", "threshold", "error_ratio", now)
+	b := anomaly.StableID("payment-service", "threshold", "error_ratio", now.Add(20*time.Second))
+	if a != b {
+		t.Fatalf("%s %s", a, b)
+	}
+	ctx := context.Background()
+	st := store.NewMemory()
+	if err := st.SaveAnomaly(ctx, domain.Anomaly{ID: a, Service: "payment-service", Detector: "threshold", Metric: "error_ratio", DetectedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveAnomaly(ctx, domain.Anomaly{ID: a, Service: "payment-service", Detector: "threshold", Metric: "error_ratio", DetectedAt: now, Summary: "updated"}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := st.ListAnomalies(ctx, time.Time{}, 10)
+	if err != nil || len(list) != 1 || list[0].Summary != "updated" {
+		t.Fatalf("%+v %v", list, err)
+	}
+	if err := st.DeleteAnomaliesBefore(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	list, _ = st.ListAnomalies(ctx, time.Time{}, 10)
+	if len(list) != 0 {
+		t.Fatalf("retained %+v", list)
+	}
+}
+
+type captureAI struct{ pack *domain.EvidencePack }
+
+func (c *captureAI) Name() string { return "capture" }
+
+func (c *captureAI) Analyze(_ context.Context, pack domain.EvidencePack) (domain.Analysis, error) {
+	c.pack = &pack
+	return domain.Analysis{Summary: "narrated", ConfidenceLabel: domain.GradePossible, Deterministic: false}, nil
 }

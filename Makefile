@@ -7,6 +7,7 @@ ENVIRONMENT ?= local
 
 .PHONY: help install lint test test-unit test-integration test-e2e security build \
 	up down reset status logs demo fault-enable fault-disable \
+	test-e2e-azure-replay test-e2e-kind \
 	terraform-fmt terraform-validate azure-bootstrap azure-plan azure-apply azure-destroy \
 	helm-lint docs onboard-service
 
@@ -25,7 +26,14 @@ test: test-unit ## Run the test suite
 test-unit: ## Unit tests
 	go test ./...
 
-test-integration: test-unit ## Integration coverage is in the unit suite plus the local stack
+test-integration: ## Postgres integration tests. Skips when DATABASE_URL is empty.
+	go test -tags=integration ./...
+
+test-e2e-azure-replay: ## Azure fixture replay, no subscription
+	go test ./internal/replay/
+
+test-e2e-kind: ## Kind cluster scenario. Requires kind and helm.
+	./scripts/e2e-kind.sh
 
 test-e2e: ## End-to-end demo against a running local stack
 	./scripts/e2e.sh

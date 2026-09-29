@@ -20,6 +20,7 @@ engine:
   interval: 15s
   correlation_window: 5m
   deployment_lookback: 30m
+  anomaly_retention: 168h
 ai:
   enabled: true
   provider: mock
