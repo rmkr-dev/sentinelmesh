@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
+	"github.com/rmkr-dev/sentinelmesh/internal/kube"
 )
 
 // SelectOptions chooses the remediation executor from configuration.
@@ -19,6 +20,7 @@ type SelectOptions struct {
 	Token              string
 	APIBase            string
 	TokenPath          string
+	CAPath             string
 	ServiceHost        string
 	ServicePort        string
 }
@@ -75,7 +77,21 @@ func Select(opts SelectOptions) (Executor, error) {
 		if ns == "" {
 			ns = "default"
 		}
-		return KubernetesExecutor{BaseURL: base, Token: token, Namespace: ns}, nil
+		exec := KubernetesExecutor{BaseURL: base, Token: token, Namespace: ns}
+		caPath := opts.CAPath
+		if caPath == "" {
+			caPath = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+		}
+		if raw, err := os.ReadFile(caPath); err == nil {
+			tokens := &kube.TokenFile{Path: opts.TokenPath}
+			client, err := kube.HTTPClient(raw, tokens)
+			if err != nil {
+				return nil, err
+			}
+			exec.HTTP = client
+			exec.Tokens = tokens
+		}
+		return exec, nil
 	default:
 		return nil, fmt.Errorf("unknown remediation executor %q", kind)
 	}
