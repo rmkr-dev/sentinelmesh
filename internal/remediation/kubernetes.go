@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
+	"github.com/rmkr-dev/sentinelmesh/internal/kube"
 )
 
 var nameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
@@ -21,6 +22,7 @@ var nameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 type KubernetesExecutor struct {
 	BaseURL   string
 	Token     string
+	Tokens    *kube.TokenFile
 	Namespace string
 	HTTP      *http.Client
 }
@@ -179,7 +181,13 @@ func (k KubernetesExecutor) do(ctx context.Context, method, path string, payload
 }
 
 func (k KubernetesExecutor) auth(req *http.Request) {
-	if k.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+k.Token)
+	token := k.Token
+	if k.Tokens != nil {
+		if fresh, err := k.Tokens.Token(); err == nil && fresh != "" {
+			token = fresh
+		}
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 }

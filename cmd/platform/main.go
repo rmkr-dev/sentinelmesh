@@ -117,13 +117,13 @@ func main() {
 		if port == "" {
 			port = "443"
 		}
-		token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+		httpClient, _, err := kube.InClusterClient("", "")
 		if err != nil {
-			slog.Error("kubernetes token", "error", err.Error())
+			slog.Error("kubernetes client", "error", err.Error())
 			os.Exit(1)
 		}
 		eng.Cluster = kube.Client{
-			BaseURL: "https://" + host + ":" + port, Token: string(token),
+			BaseURL: "https://" + host + ":" + port, HTTP: httpClient,
 			ServiceLabel: env("KUBERNETES_SERVICE_LABEL", "app.kubernetes.io/name"),
 		}
 	}
