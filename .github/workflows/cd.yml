@@ -1,7 +1,9 @@
 name: cd
 
 on:
-  push:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
     branches: [main]
 
 permissions:
@@ -9,15 +11,10 @@ permissions:
   packages: write
 
 jobs:
-  test:
-    uses: ./.github/workflows/service-ci.yml
-
   container:
-    needs: test
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     uses: ./.github/workflows/container.yml
     with:
       push: true
-
-  telemetry:
-    needs: test
-    uses: ./.github/workflows/telemetry-tests.yml
+      ref: ${{ github.event.workflow_run.head_sha }}
+    secrets: inherit

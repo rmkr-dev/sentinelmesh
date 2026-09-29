@@ -1,0 +1,16 @@
+title = "sentinelmesh"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Local demo values that are not cloud credentials"
+paths = [
+  '''(^|/)deploy/alertmanager/webhook\.token$''',
+]
+regexTarget = "line"
+regexes = [
+  '''postgres://platform:platform@''',
+  '''GRAFANA_ADMIN_PASSWORD:-observability''',
+  '''local-demo-webhook''',
+]

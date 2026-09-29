@@ -2,7 +2,9 @@
 
 ## Unreleased
 
+
 - Document trunk-based branches and the protection settings the owner still has to turn on. Pull requests fail when their own commits or body include tool attribution.
+- CI installs Go from `go.mod` before a pinned govulncheck, and secret scanning runs even if that scan fails. Publishing to GHCR waits for a green `ci` run and logs in before the push.
 - Shared telemetry bootstrap with runtime and host metrics, sampler, database spans, and optional Pyroscope.
 - Kubernetes read-only adapter, multi-hop topology, alert noise control, robust anomaly detectors, and ranked hypotheses.
 - Azure Resource Graph, Log Analytics, Azure Monitor PromQL, common alert schema, and a subscription-free replay.
