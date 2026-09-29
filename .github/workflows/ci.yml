@@ -95,12 +95,13 @@ jobs:
           go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
           out=$(go run golang.org/x/tools/cmd/deadcode@v0.34.0 ./...)
           if [ -n "$out" ]; then echo "$out"; exit 1; fi
-      - name: Shell and actions
+      - name: Shell and workflow lint
         run: |
-          bash -c 'shopt -s globstar; shellcheck scripts/*.sh'
-      - name: Coverage
+          shellcheck scripts/*.sh
+          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash | bash -s -- 1.7.7
+          ./actionlint -no-color
+      - name: Coverage report
         run: |
           go test -race -count=1 -coverprofile=cover.out ./...
-          go tool cover -func=cover.out | tail -1
-          python3 scripts/coverage-check.py cover.out > "$GITHUB_STEP_SUMMARY" || true
-          python3 scripts/coverage-check.py cover.out || echo "coverage is below scripts/coverage-check.py; see the step summary"
+          go tool cover -func=cover.out | tail -1 | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 scripts/coverage-check.py cover.out | tee -a "$GITHUB_STEP_SUMMARY" || true

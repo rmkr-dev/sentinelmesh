@@ -8,6 +8,11 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ALLOW = ROOT / "scripts" / "marker-allowlist.txt"
+# The scanner and its allowlist name the words they look for.
+SKIP = {
+    "scripts/marker-scan.py",
+    "scripts/marker-allowlist.txt",
+}
 PATTERN = re.compile(
     r"\b(TODO|FIXME|XXX|HACK)\b|not implemented|panic\(\"unimplemented|\bstub\b|\bdummy\b|\bplaceholder\b|\bfake\b|\bmock\b",
     re.IGNORECASE,
@@ -35,6 +40,8 @@ def main() -> int:
     ).splitlines()
     bad = []
     for rel in files:
+        if rel in SKIP:
+            continue
         path = ROOT / rel
         if not path.is_file():
             continue

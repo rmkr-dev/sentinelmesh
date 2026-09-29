@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The CI gate ignores the marker scanner's own word list, and config tests ignore `DATABASE_URL` from the integration job.
 - Alertmanager v4 webhooks, active-alert selection, token and OIDC roles, production config checks, Azure inventory polling, and a CI secret scan that fetches full history.
 - End-to-end tests drive the API and engine: a storage alert, function errors, a change, and resource health become one incident; a silence blocks that alert; Kubernetes evidence is limited to the matching service.
 - Kubernetes clients trust the service account CA and re-read the projected token after it expires. List calls follow continue tokens.
