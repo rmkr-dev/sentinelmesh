@@ -7,7 +7,18 @@ import (
 	"testing"
 )
 
+func isolateConfigEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"DATABASE_URL", "STORE", "PLATFORM_API_TOKEN", "PLATFORM_WEBHOOK_TOKEN",
+		"AI_ENABLED", "AI_PROVIDER", "DEMO_ENABLED", "AUTH_MODE",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 func TestProductionRejectsDemoAndMemory(t *testing.T) {
+	isolateConfigEnv(t)
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "environments"), 0o755); err != nil {
 		t.Fatal(err)
@@ -20,12 +31,13 @@ func TestProductionRejectsDemoAndMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Load(dir, "production")
-	if err == nil || !strings.Contains(err.Error(), "postgres") {
+	if err == nil || !strings.Contains(err.Error(), "store must be postgres") {
 		t.Fatal(err)
 	}
 }
 
 func TestProductionAcceptsRealSettings(t *testing.T) {
+	isolateConfigEnv(t)
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "environments"), 0o755); err != nil {
 		t.Fatal(err)
