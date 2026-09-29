@@ -215,7 +215,8 @@ func Analyze(pack Pack) domain.Analysis {
 		if statement != "" {
 			k8sEvidence = append(k8sEvidence, id)
 			a.Hypotheses = append(a.Hypotheses, domain.Hypothesis{
-				ID: "h-k8s-" + ev.Reason, Grade: grade, EvidenceIDs: []string{id}, Statement: statement,
+				ID:    "h-k8s-" + slug(ev.Reason) + "-" + slug(ev.Namespace) + "-" + slug(ev.Object),
+				Grade: grade, EvidenceIDs: []string{id}, Statement: statement,
 			})
 		}
 	}
@@ -368,6 +369,20 @@ func gradeScore(g string) float64 {
 	default:
 		return 0.15
 	}
+}
+
+func slug(v string) string {
+	v = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		default:
+			return '-'
+		}
+	}, v)
+	return strings.Trim(v, "-")
 }
 
 func symptomTime(signals []domain.Signal) time.Time {

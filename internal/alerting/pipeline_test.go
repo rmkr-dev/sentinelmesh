@@ -15,7 +15,7 @@ func TestFlapAndSilence(t *testing.T) {
 		{Name: "HighErrorRate", Service: "payment-service", Status: "firing", StartsAt: now.Add(-2 * time.Minute)},
 		{Name: "HighErrorRate", Service: "payment-service", Status: "resolved", StartsAt: now.Add(-time.Minute)},
 	}
-	if !Flapping(history, "HighErrorRate|payment-service", 3, 10*time.Minute, now) {
+	if !Flapping(history, "HighErrorRate|payment-service|", 3, 10*time.Minute, now) {
 		t.Fatal("expected flap")
 	}
 	silences := []domain.Silence{{

@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/rmkr-dev/sentinelmesh/internal/ai"
+	"github.com/rmkr-dev/sentinelmesh/internal/alerting"
 	"github.com/rmkr-dev/sentinelmesh/internal/anomaly"
 	"github.com/rmkr-dev/sentinelmesh/internal/correlation"
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
@@ -23,6 +23,7 @@ import (
 	"github.com/rmkr-dev/sentinelmesh/internal/slo"
 	"github.com/rmkr-dev/sentinelmesh/internal/store"
 	"github.com/rmkr-dev/sentinelmesh/internal/telemetryquery"
+	"github.com/rmkr-dev/sentinelmesh/internal/topology"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -149,6 +150,10 @@ func (e *Engine) tick(ctx context.Context) error {
 	deps := map[string][]string{}
 	for _, s := range services {
 		deps[s.Name] = s.Dependencies
+	}
+	e.Graph = topology.Graph{Edges: topology.FromCatalog(services, now)}
+	if e.MaxHops <= 0 {
+		e.MaxHops = 3
 	}
 	groups := correlation.Correlate(all, correlation.Options{
 		Window:             e.window(),
@@ -357,9 +362,21 @@ func (e *Engine) alertSignals(ctx context.Context, now time.Time) []domain.Signa
 	if err != nil {
 		return nil
 	}
+	silences, _ := e.Store.ListSilences(ctx)
+	windows, _ := e.Store.ListMaintenance(ctx)
 	var signals []domain.Signal
 	for _, a := range alerts {
 		if a.Status != "firing" {
+			continue
+		}
+		labels := map[string]string{"service": a.Service, "alertname": a.Name}
+		for k, v := range a.Labels {
+			labels[k] = v
+		}
+		if alerting.Silenced(silences, labels, now) || alerting.InMaintenance(windows, labels, now) {
+			continue
+		}
+		if alerting.Flapping(alerts, alerting.NormalizeFingerprint(a), 4, 30*time.Minute, now) {
 			continue
 		}
 		signals = append(signals, domain.Signal{
@@ -412,6 +429,25 @@ func (e *Engine) contextSignals(ctx context.Context, now time.Time) []domain.Sig
 			})
 		}
 	}
+	if changes, err := e.Store.ListChanges(ctx, now.Add(-e.lookback())); err == nil {
+		for _, c := range changes {
+			signals = append(signals, domain.Signal{
+				ID: c.ID, Type: domain.SignalChange, Service: c.Target,
+				Summary: c.Kind + " " + c.Target, Fingerprint: "change|" + c.ID, OccurredAt: c.OccurredAt,
+				Attributes: c.Attributes,
+			})
+		}
+	}
+	if health, err := e.Store.ListHealth(ctx, now.Add(-e.lookback())); err == nil {
+		for _, h := range health {
+			signals = append(signals, domain.Signal{
+				ID:   "health-" + h.Resource + "-" + h.At.UTC().Format(time.RFC3339),
+				Type: domain.SignalResourceHealth, Service: h.Resource, Severity: h.State,
+				Summary: "Azure reports " + h.Resource + " " + h.State, Fingerprint: "health|" + h.Resource + "|" + h.State,
+				OccurredAt: h.At, Attributes: map[string]string{"state": h.State, "reason": h.Reason, "source": h.Source},
+			})
+		}
+	}
 	return signals
 }
 
@@ -446,7 +482,7 @@ func (e *Engine) upsertGroup(ctx context.Context, g correlation.Group, services 
 			Environment:     environmentFor(services, primary),
 			StartedAt:       g.Started,
 			DetectedAt:      now,
-			Signals:         append([]domain.Signal{}, g.Signals...),
+			Signals:         append(append([]domain.Signal{}, g.Signals...), g.Context...),
 			RelatedServices: others(g.Services, primary),
 			UpdatedAt:       now,
 		}
@@ -459,7 +495,7 @@ func (e *Engine) upsertGroup(ctx context.Context, g correlation.Group, services 
 		return e.Store.SaveIncident(ctx, inc)
 	}
 	before := len(existing.Signals)
-	for _, s := range g.Signals {
+	for _, s := range append(append([]domain.Signal{}, g.Signals...), g.Context...) {
 		if !hasFingerprint(existing.Signals, s.Fingerprint) {
 			existing.Signals = append(existing.Signals, s)
 			existing.Events = append(existing.Events, domain.TimelineEntry{
@@ -649,11 +685,16 @@ func (e *Engine) AnalyzeIncident(ctx context.Context, id, actor string) (domain.
 		Message: "Deterministic analysis refreshed",
 	})
 	if e.AIEnabled && e.AI != nil {
+		k8s := e.k8sFor(&inc)
+		for i := range k8s {
+			k8s[i].Message = redaction.RedactString(e.policy(), k8s[i].Message)
+		}
 		pack := domain.EvidencePack{
-			Incident:        inc,
-			SLOStatus:       results,
-			Analysis:        inc.Analysis,
-			MetricSummaries: metricSummaries(results),
+			Incident:         inc,
+			SLOStatus:        results,
+			Analysis:         inc.Analysis,
+			MetricSummaries:  metricSummaries(results),
+			KubernetesEvents: k8s,
 		}
 		e.redactEvidence(&pack)
 		model, err := e.AI.Analyze(ctx, pack)
@@ -706,15 +747,23 @@ func (e *Engine) k8sFor(inc *domain.Incident) []domain.K8sEvent {
 	if len(e.lastK8s) == 0 {
 		return nil
 	}
-	names := append([]string{inc.Service}, inc.RelatedServices...)
-	var out []domain.K8sEvent
-	for _, ev := range e.lastK8s {
-		if contains(names, ev.Object) || contains(names, ev.Namespace) || strings.Contains(ev.Object, inc.Service) {
-			out = append(out, ev)
+	if inc.Service == "" && len(inc.RelatedServices) == 0 {
+		return nil
+	}
+	names := map[string]bool{}
+	if inc.Service != "" {
+		names[inc.Service] = true
+	}
+	for _, svc := range inc.RelatedServices {
+		if svc != "" {
+			names[svc] = true
 		}
 	}
-	if len(out) == 0 {
-		return e.lastK8s
+	var out []domain.K8sEvent
+	for _, ev := range e.lastK8s {
+		if ev.Service != "" && names[ev.Service] {
+			out = append(out, ev)
+		}
 	}
 	return out
 }

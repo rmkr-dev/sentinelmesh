@@ -8,6 +8,40 @@ import (
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
 )
 
+func bindEventServices(events []domain.K8sEvent, pods []byte, label string) []domain.K8sEvent {
+	if label == "" {
+		label = "app.kubernetes.io/name"
+	}
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name      string            `json:"name"`
+				Namespace string            `json:"namespace"`
+				Labels    map[string]string `json:"labels"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(pods, &list); err != nil {
+		return events
+	}
+	byName := map[string]string{}
+	for _, pod := range list.Items {
+		if svc := pod.Metadata.Labels[label]; svc != "" {
+			byName[pod.Metadata.Namespace+"/"+pod.Metadata.Name] = svc
+		}
+	}
+	for i := range events {
+		name := events[i].Object
+		if slash := strings.LastIndex(name, "/"); slash >= 0 {
+			name = name[slash+1:]
+		}
+		if svc := byName[events[i].Namespace+"/"+name]; svc != "" {
+			events[i].Service = svc
+		}
+	}
+	return events
+}
+
 func podSignals(body []byte, label string, now time.Time) []domain.Signal {
 	var list struct {
 		Items []struct {

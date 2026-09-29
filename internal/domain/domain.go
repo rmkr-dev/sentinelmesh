@@ -416,6 +416,7 @@ type K8sEvent struct {
 	Type      string    `json:"type"`
 	Object    string    `json:"object"`
 	Namespace string    `json:"namespace"`
+	Service   string    `json:"service,omitempty"`
 	Count     int       `json:"count"`
 	At        time.Time `json:"at"`
 }
