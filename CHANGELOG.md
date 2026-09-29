@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Kubernetes clients trust the service account CA and re-read the projected token after it expires. List calls follow continue tokens.
 - Shared telemetry bootstrap with runtime and host metrics, sampler, database spans, and optional Pyroscope.
 - Kubernetes read-only adapter, multi-hop topology, alert noise control, robust anomaly detectors, and ranked hypotheses.
 - Azure Resource Graph, Log Analytics, Azure Monitor PromQL, common alert schema, and a subscription-free replay.

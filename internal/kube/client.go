@@ -129,6 +129,40 @@ func (c Client) events(ctx context.Context) ([]domain.K8sEvent, error) {
 }
 
 func (c Client) get(ctx context.Context, path string) ([]byte, error) {
+	if strings.Contains(path, "?") {
+		return c.getOnce(ctx, path)
+	}
+	var items []json.RawMessage
+	cont := ""
+	for page := 0; page < 20; page++ {
+		q := url.Values{}
+		q.Set("limit", "500")
+		if cont != "" {
+			q.Set("continue", cont)
+		}
+		body, err := c.getOnce(ctx, path+"?"+q.Encode())
+		if err != nil {
+			return nil, err
+		}
+		var parsed struct {
+			Items    []json.RawMessage `json:"items"`
+			Metadata struct {
+				Continue string `json:"continue"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return nil, err
+		}
+		items = append(items, parsed.Items...)
+		if parsed.Metadata.Continue == "" {
+			break
+		}
+		cont = parsed.Metadata.Continue
+	}
+	return json.Marshal(map[string]any{"items": items})
+}
+
+func (c Client) getOnce(ctx context.Context, path string) ([]byte, error) {
 	u, err := url.Parse(strings.TrimRight(c.BaseURL, "/") + path)
 	if err != nil {
 		return nil, err
