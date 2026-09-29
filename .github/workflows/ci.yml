@@ -16,6 +16,9 @@ jobs:
     uses: ./.github/workflows/terraform.yml
 
   security:
+    permissions:
+      contents: read
+      security-events: write
     uses: ./.github/workflows/security.yml
 
   helm:

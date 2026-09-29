@@ -4,6 +4,8 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,6 +23,7 @@ import (
 	"github.com/rmkr-dev/sentinelmesh/internal/faults"
 	"github.com/rmkr-dev/sentinelmesh/internal/incident"
 	"github.com/rmkr-dev/sentinelmesh/internal/postmortem"
+	"github.com/rmkr-dev/sentinelmesh/internal/redaction"
 	"github.com/rmkr-dev/sentinelmesh/internal/remediation"
 	"github.com/rmkr-dev/sentinelmesh/internal/runbook"
 	"github.com/rmkr-dev/sentinelmesh/internal/slo"
@@ -30,18 +33,21 @@ import (
 
 // Server serves the platform API and the investigation UI.
 type Server struct {
-	Store      store.Store
-	Engine     *engine.Engine
-	Runbooks   []runbook.Runbook
-	Gate       remediation.Gate
-	Executor   remediation.Executor
-	Demo       bool
-	Token      string
-	WebDir     string
-	Log        *slog.Logger
-	GrafanaURL string
-	JaegerURL  string
-	metrics    *metrics
+	Store        store.Store
+	Engine       *engine.Engine
+	Runbooks     []runbook.Runbook
+	Gate         remediation.Gate
+	Executor     remediation.Executor
+	Demo         bool
+	Token        string
+	WebhookToken string
+	Principals   []Principal
+	Redaction    redaction.Policy
+	WebDir       string
+	Log          *slog.Logger
+	GrafanaURL   string
+	JaegerURL    string
+	metrics      *metrics
 }
 
 type metrics struct {
@@ -121,27 +127,118 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-		if !s.authorized(r) {
+		name, ok := s.authorize(r)
+		if !ok {
 			writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
 			return
+		}
+		if name != "" {
+			r = r.WithContext(context.WithValue(r.Context(), actorContextKey{}, name))
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func (s *Server) authorized(r *http.Request) bool {
-	if s.Token == "" {
+type actorContextKey struct{}
+
+// Principal is an authenticated caller. WebhookOnly tokens are accepted only on webhook routes.
+type Principal struct {
+	Name        string
+	Token       string
+	WebhookOnly bool
+}
+
+func (s *Server) authorize(r *http.Request) (string, bool) {
+	if isPublic(r.URL.Path) {
+		return "", true
+	}
+	if s.routeOpen(r.URL.Path) {
+		return "", true
+	}
+	bearer := bearerToken(r)
+	webhook := isWebhook(r.URL.Path)
+	matched := ""
+	for _, p := range s.principals() {
+		if p.Token == "" || !tokenEqual(bearer, p.Token) {
+			continue
+		}
+		if p.WebhookOnly && !webhook {
+			continue
+		}
+		if matched == "" {
+			matched = p.Name
+		}
+	}
+	return matched, matched != ""
+}
+
+func (s *Server) principals() []Principal {
+	if len(s.Principals) > 0 {
+		return s.Principals
+	}
+	var out []Principal
+	if s.Token != "" {
+		out = append(out, Principal{Name: "api", Token: s.Token})
+	}
+	if s.WebhookToken != "" {
+		out = append(out, Principal{Name: "alertmanager", Token: s.WebhookToken, WebhookOnly: true})
+	}
+	return out
+}
+
+func (s *Server) routeOpen(path string) bool {
+	ps := s.principals()
+	if isWebhook(path) {
+		for _, p := range ps {
+			if p.Token != "" {
+				return false
+			}
+		}
 		return true
 	}
-	switch r.URL.Path {
-	case "/health", "/ready", "/metrics":
+	for _, p := range ps {
+		if !p.WebhookOnly && p.Token != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func isPublic(path string) bool {
+	switch path {
+	case "/health", "/ready", "/metrics", "/":
 		return true
 	}
-	if strings.HasPrefix(r.URL.Path, "/ui/") {
-		return true
-	}
+	return strings.HasPrefix(path, "/ui/")
+}
+
+func isWebhook(path string) bool {
+	return path == "/api/v1/alerts/webhook" || path == "/api/v1/events"
+}
+
+func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
-	return h == "Bearer "+s.Token
+	const prefix = "Bearer "
+	if !strings.HasPrefix(h, prefix) {
+		return ""
+	}
+	return strings.TrimSpace(h[len(prefix):])
+}
+
+func tokenEqual(got, want string) bool {
+	if want == "" {
+		return false
+	}
+	sumGot := sha256.Sum256([]byte(got))
+	sumWant := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(sumGot[:], sumWant[:]) == 1
+}
+
+func (s *Server) policy() redaction.Policy {
+	if len(s.Redaction.Headers) == 0 && len(s.Redaction.JSONFields) == 0 {
+		return redaction.DefaultPolicy()
+	}
+	return s.Redaction
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -499,6 +596,10 @@ func (s *Server) alertWebhook(w http.ResponseWriter, r *http.Request) {
 		if summary == "" {
 			summary = a.Annotations["description"]
 		}
+		policy := s.policy()
+		summary = redaction.RedactString(policy, summary)
+		a.Labels = redaction.RedactAttributes(policy, a.Labels)
+		a.Annotations = redaction.RedactAttributes(policy, a.Annotations)
 		var ends *time.Time
 		if !a.EndsAt.IsZero() {
 			ends = &a.EndsAt
@@ -536,14 +637,15 @@ func (s *Server) ingestEvent(w http.ResponseWriter, r *http.Request) {
 		body.OccurredAt = time.Now().UTC()
 	}
 	id := newID("evt")
-	labels := body.Attributes
+	policy := s.policy()
+	labels := redaction.RedactAttributes(policy, body.Attributes)
 	if labels == nil {
 		labels = map[string]string{}
 	}
 	labels["signal_type"] = body.Type
 	if err := s.Store.SaveAlert(r.Context(), domain.Alert{
 		ID: id, Fingerprint: id, Name: body.Type, Service: body.Service, Severity: body.Severity,
-		Status: "firing", Summary: body.Summary, StartsAt: body.OccurredAt, Labels: labels,
+		Status: "firing", Summary: redaction.RedactString(policy, body.Summary), StartsAt: body.OccurredAt, Labels: labels,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -766,6 +868,9 @@ func rollup(results []domain.SLOResult) map[string]string {
 }
 
 func actor(r *http.Request) string {
+	if name, ok := r.Context().Value(actorContextKey{}).(string); ok && name != "" {
+		return name
+	}
 	if a := strings.TrimSpace(r.Header.Get("X-Actor")); a != "" {
 		return a
 	}

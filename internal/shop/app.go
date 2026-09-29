@@ -36,6 +36,7 @@ type Fault struct {
 // Poller caches active faults. A platform outage leaves the last snapshot in place.
 type Poller struct {
 	URL     string
+	Token   string
 	Service string
 	Client  *http.Client
 	Log     *slog.Logger
@@ -72,6 +73,9 @@ func (p *Poller) refresh(ctx context.Context) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.URL, "/")+"/api/v1/demo/faults", nil)
 	if err != nil {
 		return
+	}
+	if p.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.Token)
 	}
 	resp, err := p.Client.Do(req)
 	if err != nil {

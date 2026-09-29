@@ -188,7 +188,7 @@ func (p *Postgres) SaveAnomaly(ctx context.Context, a domain.Anomaly) error {
 		a.ID = fmt.Sprintf("%s-%s-%d", a.Service, a.Detector, a.DetectedAt.UnixNano())
 	}
 	return p.upsert(ctx, `INSERT INTO anomalies (id, service, detected_at, document) VALUES ($1, $2, $3, $4)
-		ON CONFLICT (id) DO NOTHING`, a.ID, a.Service, a.DetectedAt, a)
+		ON CONFLICT (id) DO UPDATE SET detected_at = EXCLUDED.detected_at, document = EXCLUDED.document`, a.ID, a.Service, a.DetectedAt, a)
 }
 
 func (p *Postgres) ListAnomalies(ctx context.Context, since time.Time, limit int) ([]domain.Anomaly, error) {
@@ -201,6 +201,16 @@ func (p *Postgres) ListAnomalies(ctx context.Context, since time.Time, limit int
 	}
 	defer rows.Close()
 	return collect[domain.Anomaly](rows)
+}
+
+func (p *Postgres) DeleteAnomaliesBefore(ctx context.Context, before time.Time) error {
+	_, err := p.pool.Exec(ctx, `DELETE FROM anomalies WHERE detected_at < $1`, before)
+	return err
+}
+
+func (p *Postgres) DeleteAlertsBefore(ctx context.Context, before time.Time) error {
+	_, err := p.pool.Exec(ctx, `DELETE FROM alerts WHERE starts_at < $1`, before)
+	return err
 }
 
 func (p *Postgres) AddAudit(ctx context.Context, ev domain.AuditEvent) error {

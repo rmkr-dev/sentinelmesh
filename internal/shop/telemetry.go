@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/contrib/propagators/autoprop"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
@@ -27,6 +28,13 @@ type Telemetry struct {
 	Logger     *slog.Logger
 	Duration   metric.Float64Histogram
 	TracerName string
+}
+
+// InstallPropagator sets the process-wide propagator. OTEL_PROPAGATORS selects
+// the formats. The default is W3C tracecontext plus baggage. Without this, the
+// OpenTelemetry Go global propagator is a no-op and each service starts its own trace.
+func InstallPropagator() {
+	otel.SetTextMapPropagator(autoprop.NewTextMapPropagator())
 }
 
 // Setup configures OTLP traces, metrics, and logs. Export failures do not stop the process;
@@ -52,6 +60,7 @@ func Setup(ctx context.Context, service string) (Telemetry, error) {
 		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(tp)
+	InstallPropagator()
 	shutdowns = append(shutdowns, tp.Shutdown)
 
 	metricExp, err := otlpmetrichttp.New(ctx)

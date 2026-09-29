@@ -42,6 +42,8 @@ type Store interface {
 
 	SaveAnomaly(ctx context.Context, a domain.Anomaly) error
 	ListAnomalies(ctx context.Context, since time.Time, limit int) ([]domain.Anomaly, error)
+	DeleteAnomaliesBefore(ctx context.Context, before time.Time) error
+	DeleteAlertsBefore(ctx context.Context, before time.Time) error
 
 	AddAudit(ctx context.Context, ev domain.AuditEvent) error
 	ListAudit(ctx context.Context, limit int) ([]domain.AuditEvent, error)

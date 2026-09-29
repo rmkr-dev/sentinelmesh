@@ -61,6 +61,23 @@ func RedactString(policy Policy, in string) string {
 	return out
 }
 
+// RedactAttributes redacts string map values and blocked keys.
+func RedactAttributes(policy Policy, in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return in
+	}
+	blocked := nameSet(append(append([]string{}, policy.JSONFields...), policy.Headers...))
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if blocked[strings.ToLower(k)] {
+			out[k] = redacted
+			continue
+		}
+		out[k] = RedactString(policy, v)
+	}
+	return out
+}
+
 // RedactHeaders returns a copy with blocked header values removed.
 func RedactHeaders(policy Policy, headers map[string]string) map[string]string {
 	blocked := nameSet(policy.Headers)

@@ -40,6 +40,12 @@ func Registry() []Detector {
 	}
 }
 
+// StableID is the upsert key for one detector finding in a one-minute bucket.
+func StableID(service, detector, metric string, at time.Time) string {
+	bucket := at.UTC().Truncate(time.Minute).Unix()
+	return fmt.Sprintf("%s|%s|%s|%d", service, detector, metric, bucket)
+}
+
 func ByName(name string) (Detector, bool) {
 	for _, d := range Registry() {
 		if d.Name() == name {

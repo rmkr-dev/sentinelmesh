@@ -31,3 +31,5 @@ make fault-disable FAULT=inventory-errors
 ```
 
 Catalog: `payment-latency`, `inventory-errors`, `database-timeout`, `cpu-pressure`, `memory-pressure`, `dependency-outage`, `deployment-regression`.
+
+Compose sets `PLATFORM_WEBHOOK_TOKEN=local-demo-webhook` and Alertmanager reads the same value from `deploy/alertmanager/webhook.token`. That token is accepted only on `/api/v1/alerts/webhook` and `/api/v1/events`. The API stays open until `PLATFORM_API_TOKEN` is set. The investigation UI sends a token from `sessionStorage` key `platformToken` when one has been saved in the token field. The shop fault poller sends `PLATFORM_API_TOKEN` when that variable is set.

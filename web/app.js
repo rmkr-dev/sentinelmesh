@@ -1,8 +1,17 @@
 const $ = (id) => document.getElementById(id);
 let selected = null;
 
+function authHeaders(extra) {
+  const headers = Object.assign({}, extra || {});
+  const token = sessionStorage.getItem("platformToken");
+  if (token) headers.Authorization = "Bearer " + token;
+  return headers;
+}
+
 async function api(path, options) {
-  const res = await fetch(path, options);
+  const opts = Object.assign({}, options || {});
+  opts.headers = authHeaders(opts.headers);
+  const res = await fetch(path, opts);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || res.statusText);
@@ -15,6 +24,18 @@ async function api(path, options) {
 function badge(text) {
   const safe = String(text || "unknown");
   return `<span class="badge ${safe}">${safe}</span>`;
+}
+
+function bindToken() {
+  const input = $("token");
+  if (!input) return;
+  input.value = sessionStorage.getItem("platformToken") || "";
+  input.addEventListener("change", () => {
+    const value = input.value.trim();
+    if (value) sessionStorage.setItem("platformToken", value);
+    else sessionStorage.removeItem("platformToken");
+    refresh().catch((err) => console.error(err));
+  });
 }
 
 async function loadMeta() {
@@ -93,6 +114,7 @@ async function refresh() {
   if (selected) await show(selected);
 }
 
+bindToken();
 loadMeta().catch(() => {});
 refresh().catch((err) => {
   $("slos").textContent = err.message;

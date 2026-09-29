@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
+	"github.com/rmkr-dev/sentinelmesh/internal/redaction"
 	"github.com/rmkr-dev/sentinelmesh/internal/slo"
 	"gopkg.in/yaml.v3"
 )
@@ -50,6 +51,7 @@ type EngineConfig struct {
 	Interval           time.Duration `yaml:"interval"`
 	CorrelationWindow  time.Duration `yaml:"correlation_window"`
 	DeploymentLookback time.Duration `yaml:"deployment_lookback"`
+	AnomalyRetention   time.Duration `yaml:"anomaly_retention"`
 }
 
 type AIConfig struct {
@@ -76,7 +78,21 @@ type DemoConfig struct {
 }
 
 type AuthConfig struct {
-	Token string `yaml:"token"`
+	Token        string `yaml:"token"`
+	WebhookToken string `yaml:"webhook_token"`
+}
+
+// Policy builds the redaction policy the platform applies before persistence and AI calls.
+func (t TelemetryConfig) Policy() redaction.Policy {
+	p := redaction.DefaultPolicy()
+	if len(t.HeaderDenylist) > 0 {
+		p.Headers = append([]string{}, t.HeaderDenylist...)
+	}
+	if len(t.QueryDenylist) > 0 {
+		p.QueryParameters = append([]string{}, t.QueryDenylist...)
+	}
+	p.RedactEmails = t.RedactEmails
+	return p
 }
 
 type UIConfig struct {
@@ -159,6 +175,9 @@ func Load(dir, environment string) (Config, error) {
 	if cfg.Engine.DeploymentLookback == 0 {
 		cfg.Engine.DeploymentLookback = 30 * time.Minute
 	}
+	if cfg.Engine.AnomalyRetention == 0 {
+		cfg.Engine.AnomalyRetention = 7 * 24 * time.Hour
+	}
 	return cfg, nil
 }
 
@@ -177,6 +196,7 @@ func defaults(env string) Config {
 			Interval:           15 * time.Second,
 			CorrelationWindow:  5 * time.Minute,
 			DeploymentLookback: 30 * time.Minute,
+			AnomalyRetention:   7 * 24 * time.Hour,
 		},
 		AI: AIConfig{Enabled: true, Provider: "mock", Temperature: 0, MaxTokens: 1200},
 		Remediation: RemediationConfig{
@@ -220,6 +240,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PLATFORM_API_TOKEN"); v != "" {
 		cfg.Auth.Token = v
+	}
+	if v := os.Getenv("PLATFORM_WEBHOOK_TOKEN"); v != "" {
+		cfg.Auth.WebhookToken = v
 	}
 	if v := os.Getenv("AI_PROVIDER"); v != "" {
 		cfg.AI.Provider = v

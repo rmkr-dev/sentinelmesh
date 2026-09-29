@@ -20,4 +20,17 @@ Each service polls `GET /api/v1/demo/faults` once a second. If the platform is u
 
 ## Backends
 
-Prometheus evaluates `deploy/prometheus/rules.yml` and Alertmanager posts to `/api/v1/alerts/webhook`. Grafana is provisioned from `dashboards/grafana`. Jaeger and Loki are queried only while building an evidence pack.
+Prometheus evaluates `deploy/prometheus/rules.yml` and Alertmanager posts to `/api/v1/alerts/webhook`. Grafana is provisioned from `dashboards/grafana`. Jaeger and Loki are queried only while building an evidence pack. Those queries use `TraceSearcher` and `LogSearcher` and are limited to the incident window plus the deployment lookback.
+
+## Wired and not wired
+
+| Capability | State |
+| --- | --- |
+| W3C tracecontext and baggage propagation | Wired in `internal/shop` via `OTEL_PROPAGATORS` |
+| Platform redaction before Postgres and the AI pack | Wired from `telemetry.header_denylist`, `query_denylist`, and `redact_emails` |
+| Remediation executor `demo` or `kubernetes` | Wired. Kubernetes reads the in-cluster service account token |
+| Stable anomaly ids and 7 day retention | Wired |
+| API token compared in constant time, webhook token, actor taken from the authenticated principal | Wired when a token is configured |
+| Kubernetes events inside RCA | Not wired. `rca.Pack.K8s` stays empty |
+| Azure Monitor query adapters | Not wired. Azure mode still needs Prometheus, Jaeger, and Loki URLs |
+| Kubernetes Grafana dashboard series | Not collected by the local stack |

@@ -68,13 +68,19 @@ func main() {
 		prompt = string(b)
 	}
 	provider := buildAI(cfg.AI, prompt)
+	deps := engine.Dependencies{}
+	if cfg.Telemetry.PrometheusURL != "" {
+		deps.Metrics = telemetryquery.PrometheusClient{BaseURL: cfg.Telemetry.PrometheusURL}
+	}
+	if cfg.Telemetry.JaegerURL != "" {
+		deps.Traces = telemetryquery.JaegerClient{BaseURL: cfg.Telemetry.JaegerURL}
+	}
+	if cfg.Telemetry.LokiURL != "" {
+		deps.Logs = telemetryquery.LokiClient{BaseURL: cfg.Telemetry.LokiURL}
+	}
 	eng := &engine.Engine{
 		Store: st,
-		Deps: engine.Dependencies{
-			Metrics: telemetryquery.PrometheusClient{BaseURL: cfg.Telemetry.PrometheusURL},
-			Traces:  &telemetryquery.JaegerClient{BaseURL: cfg.Telemetry.JaegerURL},
-			Logs:    &telemetryquery.LokiClient{BaseURL: cfg.Telemetry.LokiURL},
-		},
+		Deps:  deps,
 		Conventions: telemetryquery.Conventions{
 			RequestMetric: cfg.Telemetry.RequestMetric,
 			ServiceLabel:  cfg.Telemetry.ServiceLabel,
@@ -86,9 +92,8 @@ func main() {
 		Log:       logger,
 		AI:        provider,
 		AIEnabled: cfg.AI.Enabled && provider != nil,
-	}
-	if cfg.Telemetry.PrometheusURL == "" {
-		eng.Deps.Metrics = nil
+		Redaction: cfg.Telemetry.Policy(),
+		Retention: cfg.Engine.AnomalyRetention,
 	}
 
 	allowed := map[string]bool{}
@@ -100,20 +105,32 @@ func main() {
 		RequireApproval: cfg.Remediation.RequireApproval,
 		Allowed:         allowed,
 	}}
-	exec := remediation.DemoExecutor{Apply: demoApply(st)}
+	exec, err := remediation.Select(remediation.SelectOptions{
+		Executor:           cfg.Remediation.Executor,
+		Namespace:          cfg.Remediation.Namespace,
+		DemoEnabled:        cfg.Demo.Enabled,
+		RemediationEnabled: cfg.Remediation.Enabled,
+		DemoApply:          demoApply(st),
+	})
+	if err != nil {
+		slog.Error("remediation executor", "error", err.Error())
+		os.Exit(1)
+	}
 
 	srv := &api.Server{
-		Store:      st,
-		Engine:     eng,
-		Runbooks:   books,
-		Gate:       gate,
-		Executor:   exec,
-		Demo:       cfg.Demo.Enabled,
-		Token:      cfg.Auth.Token,
-		WebDir:     env("WEB_DIR", "web"),
-		GrafanaURL: cfg.UI.GrafanaURL,
-		JaegerURL:  cfg.UI.JaegerURL,
-		Log:        logger,
+		Store:        st,
+		Engine:       eng,
+		Runbooks:     books,
+		Gate:         gate,
+		Executor:     exec,
+		Demo:         cfg.Demo.Enabled,
+		Token:        cfg.Auth.Token,
+		WebhookToken: cfg.Auth.WebhookToken,
+		Redaction:    cfg.Telemetry.Policy(),
+		WebDir:       env("WEB_DIR", "web"),
+		GrafanaURL:   cfg.UI.GrafanaURL,
+		JaegerURL:    cfg.UI.JaegerURL,
+		Log:          logger,
 	}
 	httpServer := &http.Server{
 		Addr:              cfg.HTTP.Addr,

@@ -61,6 +61,7 @@ func main() {
 		Query:           query,
 		Poller: &shop.Poller{
 			URL:     os.Getenv("PLATFORM_URL"),
+			Token:   os.Getenv("PLATFORM_API_TOKEN"),
 			Service: name,
 			Log:     tel.Logger,
 		},

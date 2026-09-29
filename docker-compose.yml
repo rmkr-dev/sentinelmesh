@@ -65,6 +65,7 @@ services:
     image: prom/alertmanager:v0.28.1
     volumes:
       - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./deploy/alertmanager/webhook.token:/etc/alertmanager/webhook.token:ro
     ports:
       - "9093:9093"
 
@@ -117,6 +118,7 @@ services:
       DEMO_ENABLED: "true"
       AI_ENABLED: "true"
       AI_PROVIDER: mock
+      PLATFORM_WEBHOOK_TOKEN: local-demo-webhook
     ports:
       - "8080:8080"
     depends_on:

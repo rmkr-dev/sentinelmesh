@@ -17,6 +17,7 @@ import (
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
 	"github.com/rmkr-dev/sentinelmesh/internal/incident"
 	"github.com/rmkr-dev/sentinelmesh/internal/rca"
+	"github.com/rmkr-dev/sentinelmesh/internal/redaction"
 	"github.com/rmkr-dev/sentinelmesh/internal/runbook"
 	"github.com/rmkr-dev/sentinelmesh/internal/slo"
 	"github.com/rmkr-dev/sentinelmesh/internal/store"
@@ -26,8 +27,8 @@ import (
 // Dependencies are the read-only telemetry backends. Any of them may be absent.
 type Dependencies struct {
 	Metrics telemetryquery.MetricQuery
-	Traces  *telemetryquery.JaegerClient
-	Logs    *telemetryquery.LokiClient
+	Traces  telemetryquery.TraceSearcher
+	Logs    telemetryquery.LogSearcher
 }
 
 // Engine is the SRE control loop.
@@ -42,6 +43,8 @@ type Engine struct {
 	Now         func() time.Time
 	AI          ai.Provider
 	AIEnabled   bool
+	Redaction   redaction.Policy
+	Retention   time.Duration
 
 	mu          sync.Mutex
 	metricState string
@@ -130,7 +133,26 @@ func (e *Engine) Tick(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := e.sweep(ctx, now); err != nil {
+		e.log().Warn("retention sweep failed", "error", err.Error())
+	}
 	return nil
+}
+
+func (e *Engine) sweep(ctx context.Context, now time.Time) error {
+	keep := e.retention()
+	before := now.Add(-keep)
+	if err := e.Store.DeleteAnomaliesBefore(ctx, before); err != nil {
+		return err
+	}
+	return e.Store.DeleteAlertsBefore(ctx, before)
+}
+
+func (e *Engine) retention() time.Duration {
+	if e.Retention <= 0 {
+		return 7 * 24 * time.Hour
+	}
+	return e.Retention
 }
 
 func (e *Engine) evaluateSLOs(ctx context.Context, defs []domain.SLODefinition, now time.Time) ([]domain.SLOResult, []domain.Signal) {
@@ -256,8 +278,8 @@ func (e *Engine) detectAnomalies(ctx context.Context, services []domain.Service,
 				continue
 			}
 			for _, a := range found {
-				a.ID = fmt.Sprintf("%s-%s-%d", a.Service, a.Detector, a.DetectedAt.UnixNano())
 				a.DetectedAt = now
+				a.ID = anomaly.StableID(a.Service, a.Detector, a.Metric, now)
 				_ = e.Store.SaveAnomaly(ctx, a)
 				signals = append(signals, domain.Signal{
 					ID:          a.ID,
@@ -435,8 +457,11 @@ func (e *Engine) applyAnalysis(ctx context.Context, inc *domain.Incident, result
 		SLO:         sloResults,
 		Now:         now,
 	}
-	if e.Deps.Traces != nil && e.Deps.Traces.BaseURL != "" {
-		samples, err := e.Deps.Traces.Search(ctx, inc.Service, 10)
+	from, to := e.evidenceWindow(*inc, now)
+	if e.Deps.Traces != nil {
+		samples, err := e.Deps.Traces.SearchTraces(ctx, telemetryquery.TraceQuery{
+			Service: inc.Service, Start: from, End: to, Limit: 10,
+		})
 		if err != nil {
 			e.traceState = "degraded"
 		} else {
@@ -446,8 +471,10 @@ func (e *Engine) applyAnalysis(ctx context.Context, inc *domain.Incident, result
 	} else {
 		e.traceState = "not_configured"
 	}
-	if e.Deps.Logs != nil && e.Deps.Logs.BaseURL != "" {
-		lines, err := e.Deps.Logs.Search(ctx, inc.Service, 10)
+	if e.Deps.Logs != nil {
+		lines, err := e.Deps.Logs.SearchLogs(ctx, telemetryquery.LogQuery{
+			Service: inc.Service, Start: from, End: to, Limit: 10,
+		})
 		if err != nil {
 			e.logState = "degraded"
 		} else {
@@ -457,6 +484,8 @@ func (e *Engine) applyAnalysis(ctx context.Context, inc *domain.Incident, result
 	} else {
 		e.logState = "not_configured"
 	}
+	e.redactPack(&pack)
+	e.redactSignals(inc)
 	analysis := rca.Analyze(pack)
 	matched := runbook.Match(e.Runbooks, *inc)
 	analysis.RecommendedActions = append(analysis.RecommendedActions, runbook.Actions(matched)...)
@@ -570,6 +599,7 @@ func (e *Engine) AnalyzeIncident(ctx context.Context, id, actor string) (domain.
 			Analysis:        inc.Analysis,
 			MetricSummaries: metricSummaries(results),
 		}
+		e.redactEvidence(&pack)
 		model, err := e.AI.Analyze(ctx, pack)
 		if err != nil {
 			degraded := ai.Degraded(*inc.Analysis, err)
@@ -611,6 +641,66 @@ func metricSummaries(results []domain.SLOResult) []string {
 // operationalWindow reports whether a window describes current impact.
 // Windows longer than five minutes, including the 30 day compliance window,
 // are still evaluated and shown. They do not open or hold an incident.
+func (e *Engine) evidenceWindow(inc domain.Incident, now time.Time) (time.Time, time.Time) {
+	from := now.Add(-e.lookback())
+	if !inc.StartedAt.IsZero() {
+		earlier := inc.StartedAt.Add(-e.lookback())
+		if earlier.Before(from) {
+			from = earlier
+		}
+	}
+	return from, now
+}
+
+func (e *Engine) policy() redaction.Policy {
+	if len(e.Redaction.Headers) == 0 && len(e.Redaction.JSONFields) == 0 {
+		return redaction.DefaultPolicy()
+	}
+	return e.Redaction
+}
+
+func (e *Engine) redactPack(pack *rca.Pack) {
+	policy := e.policy()
+	for i := range pack.Logs {
+		pack.Logs[i].Body = redaction.RedactString(policy, pack.Logs[i].Body)
+		pack.Logs[i].Attributes = redaction.RedactAttributes(policy, pack.Logs[i].Attributes)
+	}
+	for i := range pack.Traces {
+		pack.Traces[i].Error = redaction.RedactString(policy, pack.Traces[i].Error)
+		pack.Traces[i].Operation = redaction.RedactString(policy, pack.Traces[i].Operation)
+	}
+	for i := range pack.Changes {
+		pack.Changes[i].Summary = redaction.RedactString(policy, pack.Changes[i].Summary)
+		pack.Changes[i].Attributes = redaction.RedactAttributes(policy, pack.Changes[i].Attributes)
+	}
+}
+
+func (e *Engine) redactEvidence(pack *domain.EvidencePack) {
+	policy := e.policy()
+	pack.Incident.Summary = redaction.RedactString(policy, pack.Incident.Summary)
+	pack.Incident.Impact = redaction.RedactString(policy, pack.Incident.Impact)
+	e.redactSignals(&pack.Incident)
+	if pack.Analysis == nil {
+		return
+	}
+	pack.Analysis.Summary = redaction.RedactString(policy, pack.Analysis.Summary)
+	pack.Analysis.Impact = redaction.RedactString(policy, pack.Analysis.Impact)
+	for i := range pack.Analysis.Evidence {
+		pack.Analysis.Evidence[i].Summary = redaction.RedactString(policy, pack.Analysis.Evidence[i].Summary)
+	}
+	for i := range pack.Analysis.Hypotheses {
+		pack.Analysis.Hypotheses[i].Statement = redaction.RedactString(policy, pack.Analysis.Hypotheses[i].Statement)
+	}
+}
+
+func (e *Engine) redactSignals(inc *domain.Incident) {
+	policy := e.policy()
+	for i := range inc.Signals {
+		inc.Signals[i].Summary = redaction.RedactString(policy, inc.Signals[i].Summary)
+		inc.Signals[i].Attributes = redaction.RedactAttributes(policy, inc.Signals[i].Attributes)
+	}
+}
+
 func operationalWindow(w domain.SLOWindow) bool {
 	if w.Duration <= 0 {
 		return !w.Compliance

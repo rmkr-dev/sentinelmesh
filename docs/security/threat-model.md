@@ -27,7 +27,7 @@ The shop does not trust the model. The model does not trust the shop's raw logs;
 | Threat | Mitigation |
 | --- | --- |
 | Secrets in spans or logs | Collector redaction and platform redaction. Tests cover the common fields. |
-| Stolen API token | Optional bearer token. Health endpoints stay open so probes work. |
+| Stolen API token | Optional bearer token, compared without a short-circuit on the raw string. Health, metrics, and the UI shell stay open so probes work. A separate webhook token is accepted only on webhook routes. When any API principal is configured, `X-Actor` is ignored and the actor is the principal that presented the token. |
 | Remediation abuse | Disabled by default. Second-person approval. Allowlisted actions. DNS-label checks on Kubernetes names. Audit record. |
 | Prompt injection in logs | The model only sees short excerpts, and merge drops hypotheses that cite ids the engine did not produce. |
 | Supply chain | `go vet`, `govulncheck` in CI, non-root images, read-only root filesystem in Helm. |
