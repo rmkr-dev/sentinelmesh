@@ -37,3 +37,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Documentation links
         run: python3 scripts/validate-docs.py
+
+  hygiene:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Commit hygiene
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 scripts/test_commit_hygiene.py
+          python3 scripts/commit-hygiene.py "$BASE" "$HEAD"
