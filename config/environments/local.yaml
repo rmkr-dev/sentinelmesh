@@ -1,0 +1,21 @@
+store: postgres
+database_url: postgres://platform:platform@postgres:5432/platform?sslmode=disable
+telemetry:
+  prometheus_url: http://prometheus:9090
+  jaeger_url: http://jaeger:16686
+  loki_url: http://loki:3100
+engine:
+  interval: 10s
+ai:
+  enabled: true
+  provider: mock
+  temperature: 0
+demo:
+  enabled: true
+ui:
+  grafana_url: http://localhost:3000
+  jaeger_url: http://localhost:16686
+remediation:
+  enabled: false
+  require_approval: true
+  executor: demo

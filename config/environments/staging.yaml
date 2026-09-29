@@ -1,0 +1,15 @@
+store: postgres
+demo:
+  enabled: false
+ai:
+  enabled: true
+  provider: azure-openai
+  temperature: 0
+remediation:
+  enabled: false
+  require_approval: true
+  executor: kubernetes
+engine:
+  interval: 30s
+  correlation_window: 10m
+  deployment_lookback: 45m

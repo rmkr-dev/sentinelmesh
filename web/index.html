@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Cloud Observability & AIOps Platform</title>
+<link rel="stylesheet" href="app.css"/>
+</head>
+<body>
+<header>
+  <div>
+    <p class="eyebrow">Cloud Observability & AIOps Platform</p>
+    <h1>Investigation console</h1>
+  </div>
+  <nav>
+    <a id="grafana" href="http://localhost:3000" target="_blank" rel="noreferrer">Grafana</a>
+    <a id="jaeger" href="http://localhost:16686" target="_blank" rel="noreferrer">Jaeger</a>
+    <a href="http://localhost:8081" target="_blank" rel="noreferrer">Storefront</a>
+    <label class="token">API token <input id="token" type="password" autocomplete="off" placeholder="session only"/></label>
+  </nav>
+</header>
+<main>
+  <section>
+    <h2>SLO status</h2>
+    <div id="slos" class="table"></div>
+  </section>
+  <section class="split">
+    <div>
+      <h2>Incidents</h2>
+      <div id="incidents"></div>
+    </div>
+    <div>
+      <h2>Demo faults</h2>
+      <p class="note">Faults are control-plane changes. The engine cites them as observed facts and still separates correlation from cause.</p>
+      <div id="faults"></div>
+    </div>
+  </section>
+  <section id="detail" hidden>
+    <h2 id="detail-title">Incident</h2>
+    <div id="grades"></div>
+    <h3>Summary</h3>
+    <p id="summary"></p>
+    <h3>Timeline</h3>
+    <ol id="timeline"></ol>
+    <h3>Hypotheses</h3>
+    <div id="hypotheses"></div>
+    <h3>Evidence</h3>
+    <ul id="evidence"></ul>
+    <p>
+      <button id="analyze" type="button">Analyze</button>
+      <button id="postmortem" type="button">Postmortem</button>
+    </p>
+    <pre id="postmortem-body"></pre>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+name: inventory-service
+team: catalog
+owner: catalog-oncall
+criticality: high
+version: 1.8.1
+repository: github.com/rmkr-dev/sentinelmesh
+dependencies:
+  - shop-postgres
+attributes:
+  tier: application

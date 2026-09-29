@@ -1,0 +1,14 @@
+/bin/
+/dist/
+/coverage.out
+.env
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.idea/
+.vscode/
+*.exe
+crash.log
+/tmp/
+.DS_Store

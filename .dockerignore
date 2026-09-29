@@ -1,0 +1,10 @@
+.git
+bin
+dist
+coverage.out
+**/*_test.go
+docs
+infra/terraform/.terraform
+*.tfstate
+*.tfstate.*
+.env

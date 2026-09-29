@@ -1,0 +1,9 @@
+service: order-service
+slos:
+  availability:
+    target: 99.9%
+    windows: [1m, 5m, 1h, 30d]
+  latency:
+    target: 99%
+    threshold_ms: 800
+    windows: [1m, 5m, 1h, 30d]

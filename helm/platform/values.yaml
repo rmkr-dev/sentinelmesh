@@ -1,0 +1,53 @@
+nameOverride: platform
+namespace: observability
+
+platform:
+  image: sentinelmesh:local
+  imageRepository: ""
+  imageTag: "0.1.0"
+  replicas: 1
+  demo: false
+  env: production
+  store: postgres
+  databaseUrl: ""
+  prometheusUrl: http://prometheus:9090
+  jaegerUrl: http://jaeger:16686
+  lokiUrl: http://loki:3100
+  aiProvider: mock
+  aiEnabled: true
+  apiToken: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+collector:
+  enabled: true
+  image: otel/opentelemetry-collector-contrib:0.148.0
+  agent:
+    enabled: false
+  gateway:
+    enabled: false
+  jaegerEndpoint: jaeger:4317
+  lokiEndpoint: http://loki:3100/otlp
+  azure:
+    enabled: false
+    # azure_auth use_default requires collector-contrib 0.148.0 or newer.
+    image: otel/opentelemetry-collector-contrib:0.148.0
+    clientId: ""
+    tracesEndpoint: ""
+    logsEndpoint: ""
+    metricsEndpoint: ""
+
+demo:
+  enabled: false
+  image: sentinelmesh:local
+
+serviceAccount:
+  name: platform
+
+networkPolicy:
+  enabled: true

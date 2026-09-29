@@ -1,0 +1,4 @@
+name: healthy
+description: Steady checkout traffic with no faults. SLOs stay no_data until requests arrive, then healthy.
+expected:
+  incidents: 0

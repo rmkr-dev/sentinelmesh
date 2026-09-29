@@ -1,0 +1,50 @@
+http:
+  addr: ":8080"
+store: memory
+telemetry:
+  request_metric: http_server_request_duration_seconds
+  service_label: service_name
+  status_label: http_response_status_code
+  redact_emails: true
+  header_denylist:
+    - authorization
+    - cookie
+    - set-cookie
+    - x-api-key
+  query_denylist:
+    - token
+    - password
+    - access_token
+    - api_key
+engine:
+  interval: 15s
+  correlation_window: 5m
+  deployment_lookback: 30m
+  anomaly_retention: 168h
+ai:
+  enabled: true
+  provider: mock
+  model: ""
+  temperature: 0
+  max_tokens: 1200
+remediation:
+  enabled: false
+  require_approval: true
+  executor: demo
+  allowed_actions:
+    - restart_pod
+    - scale_deployment
+    - rollback_deployment
+demo:
+  enabled: false
+auth:
+  token: ""
+ui:
+  grafana_url: ""
+  jaeger_url: ""
+paths:
+  services: services
+  slos: slo
+  runbooks: runbooks
+  prompts: prompts
+  web: web

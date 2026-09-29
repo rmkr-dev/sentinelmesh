@@ -1,0 +1,30 @@
+groups:
+  - name: shop
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum by (service_name) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[2m]))
+            /
+            clamp_min(sum by (service_name) (rate(http_server_request_duration_seconds_count[2m])), 1e-9)
+          ) > 0.05
+        for: 30s
+        labels:
+          severity: critical
+          service: "{{ $labels.service_name }}"
+        annotations:
+          summary: "{{ $labels.service_name }} error rate is above 5%"
+          description: "HTTP 5xx ratio for {{ $labels.service_name }} exceeded 0.05 for 30s."
+      - alert: PaymentHighLatency
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name="payment-service"}[2m]))
+          ) > 0.5
+        for: 30s
+        labels:
+          severity: warning
+          service: payment-service
+        annotations:
+          summary: "payment-service p99 latency is above 500ms"
+          description: "Latency SLO threshold of 500ms is not being met."

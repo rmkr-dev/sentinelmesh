@@ -1,0 +1,9 @@
+service: api-gateway
+slos:
+  availability:
+    target: 99.9%
+    windows: [1m, 5m, 1h, 30d]
+  latency:
+    target: 99%
+    threshold_ms: 1000
+    windows: [1m, 5m, 1h, 30d]

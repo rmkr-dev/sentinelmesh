@@ -1,0 +1,74 @@
+# Azure Monitor OTLP ingestion.
+# Requires collector-contrib with the azure_auth extension (0.148.0 or newer
+# for use_default). Endpoints come from Application Insights → OTLP Connection Info
+# or from a Data Collection Rule. See docs/deployment/azure.md.
+#
+# Metrics emitted by the Go SDK are cumulative. Azure Monitor application
+# experiences expect delta temporality, so the metrics pipeline converts them.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+  redaction:
+    allow_all_keys: true
+    blocked_key_patterns:
+      - (?i).*password.*
+      - (?i).*secret.*
+      - (?i).*token.*
+      - (?i)authorization
+      - (?i).*cookie.*
+  filter/health:
+    error_mode: ignore
+    traces:
+      span:
+        - attributes["url.path"] == "/health" or attributes["http.route"] == "/health"
+  cumulativetodelta: {}
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  azure_auth:
+    use_default: true
+    scopes:
+      - https://monitor.azure.com/.default
+
+exporters:
+  otlphttp/azuremonitor:
+    traces_endpoint: ${env:AZURE_MONITOR_TRACES_ENDPOINT}
+    logs_endpoint: ${env:AZURE_MONITOR_LOGS_ENDPOINT}
+    metrics_endpoint: ${env:AZURE_MONITOR_METRICS_ENDPOINT}
+    auth:
+      authenticator: azure_auth
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  extensions: [health_check, azure_auth]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/health, redaction, batch]
+      exporters: [otlphttp/azuremonitor]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, cumulativetodelta, batch]
+      exporters: [otlphttp/azuremonitor, prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, redaction, batch]
+      exporters: [otlphttp/azuremonitor]

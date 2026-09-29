@@ -1,0 +1,38 @@
+name: deploy-azure
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Terraform profile
+        type: choice
+        options:
+          - azure-minimal
+          - azure-production
+        default: azure-minimal
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.profile == 'azure-production' && 'production' || 'development' }}
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - name: Init
+        run: terraform init -backend=false
+      - name: Plan
+        run: terraform plan -var-file=profiles/${{ inputs.profile }}.tfvars -var=subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}

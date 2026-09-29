@@ -1,0 +1,23 @@
+name: cd
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    uses: ./.github/workflows/service-ci.yml
+
+  container:
+    needs: test
+    uses: ./.github/workflows/container.yml
+    with:
+      push: true
+
+  telemetry:
+    needs: test
+    uses: ./.github/workflows/telemetry-tests.yml

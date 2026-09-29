@@ -1,0 +1,36 @@
+{
+  "uid": "kubernetes",
+  "title": "Kubernetes",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "timezone": "utc",
+  "tags": ["platform", "kubernetes"],
+  "time": {"from": "now-3h", "to": "now"},
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Pods not ready",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(kube_pod_status_ready{condition=\"false\"}) or vector(0)"}]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "CPU by pod",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "legendFormat": "{{pod}}", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{container!=\"\"}[5m]))"}]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Memory by pod",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "legendFormat": "{{pod}}", "expr": "sum by (pod) (container_memory_working_set_bytes{container!=\"\"})"}]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Restarts",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "legendFormat": "{{pod}}", "expr": "sum by (pod) (kube_pod_container_status_restarts_total)"}]
+    }
+  ]
+}

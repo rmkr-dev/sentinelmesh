@@ -1,0 +1,7 @@
+ai:
+  enabled: true
+  provider: openai-compatible
+  base_url: http://127.0.0.1:11434
+  model: llama3.1
+  temperature: 0
+  max_tokens: 1200

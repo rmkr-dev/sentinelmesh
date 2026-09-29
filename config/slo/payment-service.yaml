@@ -1,0 +1,15 @@
+service: payment-service
+slos:
+  availability:
+    target: 99.95%
+    description: Share of payment requests that are not HTTP 5xx.
+    windows: [1m, 5m, 1h, 30d]
+  latency:
+    target: 99%
+    threshold_ms: 500
+    description: Share of payment requests faster than 500ms.
+    windows: [1m, 5m, 1h, 30d]
+  error_rate:
+    target: 99.9%
+    description: Success rate. The target is the minimum share of non-5xx responses.
+    windows: [1m, 5m, 1h, 30d]

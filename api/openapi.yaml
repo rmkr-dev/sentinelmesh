@@ -1,0 +1,189 @@
+openapi: 3.0.3
+info:
+  title: Cloud Observability & AIOps Platform
+  version: 0.1.0
+  description: Platform API. Telemetry stays in the backends. This API serves catalog, SLO results, incidents, and demo faults.
+servers:
+  - url: http://localhost:8080
+paths:
+  /health:
+    get:
+      summary: Process health
+      responses:
+        "200":
+          description: Process is up
+  /ready:
+    get:
+      summary: Readiness
+      responses:
+        "200":
+          description: Store is reachable
+        "503":
+          description: Store is not reachable
+  /api/v1/services:
+    get:
+      summary: List services
+      responses:
+        "200":
+          description: Catalog
+    post:
+      summary: Upsert a service
+      responses:
+        "200":
+          description: Stored
+  /api/v1/services/{service}:
+    get:
+      summary: Get a service
+      parameters:
+        - name: service
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Service
+  /api/v1/slos:
+    get:
+      summary: SLO definitions and latest results
+      responses:
+        "200":
+          description: Results
+  /api/v1/slos/{service}:
+    get:
+      summary: SLO results for one service
+      parameters:
+        - name: service
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Results
+  /api/v1/incidents:
+    get:
+      summary: List incidents
+      responses:
+        "200":
+          description: Incidents
+  /api/v1/incidents/{id}:
+    get:
+      summary: Get an incident
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Incident
+  /api/v1/incidents/{id}/analyze:
+    post:
+      summary: Refresh deterministic analysis and optionally narrate it
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Incident with analysis
+  /api/v1/incidents/{id}/timeline:
+    get:
+      summary: Incident timeline
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Events
+  /api/v1/incidents/{id}/postmortem:
+    get:
+      summary: Render a postmortem from recorded fields
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Markdown
+  /api/v1/anomalies:
+    get:
+      summary: Recent anomalies
+      responses:
+        "200":
+          description: Anomalies
+  /api/v1/deployments:
+    get:
+      summary: List deployments
+      responses:
+        "200":
+          description: Deployments
+    post:
+      summary: Record a deployment
+      responses:
+        "201":
+          description: Created
+  /api/v1/dependencies:
+    get:
+      summary: Catalog dependency edges with SLO health
+      responses:
+        "200":
+          description: Edges
+  /api/v1/demo/faults:
+    get:
+      summary: Active demo faults and the catalog
+      responses:
+        "200":
+          description: Faults
+        "404":
+          description: Demo disabled
+    post:
+      summary: Enable a catalog fault
+      responses:
+        "200":
+          description: Enabled
+  /api/v1/alerts/azure-monitor:
+    post:
+      summary: Ingest an Azure Monitor common alert schema payload
+      responses:
+        "202":
+          description: accepted
+  /api/v1/resources:
+    get:
+      summary: List inventoried resources
+      responses:
+        "200":
+          description: resources
+  /api/v1/topology:
+    get:
+      summary: Service and infrastructure edges
+      responses:
+        "200":
+          description: topology
+  /api/v1/silences:
+    get:
+      summary: List silences
+      responses:
+        "200":
+          description: silences
+    post:
+      summary: Create a silence
+      responses:
+        "201":
+          description: created
+  /api/v1/alerts/webhook:
+    post:
+      summary: Alertmanager webhook
+      responses:
+        "202":
+          description: Accepted
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+security:
+  - bearerAuth: []

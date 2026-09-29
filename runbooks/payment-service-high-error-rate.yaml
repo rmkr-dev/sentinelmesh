@@ -1,0 +1,27 @@
+id: payment-service-high-error-rate
+title: Payment service high error rate
+service: payment-service
+trigger:
+  signal_types: [slo, alert]
+  metric: http_server_error_rate
+  threshold: 0.05
+steps:
+  - id: inspect_recent_deployment
+    action: read
+    description: Compare the newest payment-service deployment timestamp with the first error and latency symptom.
+  - id: inspect_dependency_health
+    action: read
+    description: Check whether order-service client spans fail only when calling payment-service.
+  - id: inspect_database_latency
+    action: read
+    description: Payment has no database. Confirm the failing span is the charge handler, not a downstream datastore.
+  - id: inspect_error_traces
+    action: read
+    description: Open error traces for POST /v1/charges and record the status code and error message.
+  - id: collect_recent_logs
+    action: read
+    description: Read redacted payment-service logs that share the trace id. Do not copy tokens into the incident record.
+  - id: evaluate_rollback
+    action: recommend
+    description: If the deployment correlation is strong, request human approval to roll back. Do not roll back automatically.
+    remediation: rollback_deployment

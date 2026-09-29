@@ -1,0 +1,11 @@
+service: checkout-example
+slos:
+  availability:
+    target: 99.9%
+    windows: [5m, 1h, 30d]
+    description: Example objective for a service that is not in the sample shop.
+  latency:
+    target: 99%
+    threshold_ms: 250
+    windows: [5m, 1h]
+    description: Requests faster than 250ms.

@@ -1,0 +1,9 @@
+name: notification-service
+team: checkout
+owner: checkout-oncall
+criticality: low
+version: 1.8.1
+repository: github.com/rmkr-dev/sentinelmesh
+dependencies: []
+attributes:
+  tier: application
