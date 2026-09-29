@@ -24,6 +24,12 @@ type Memory struct {
 	faults       map[string]domain.Fault
 	alerts       []domain.Alert
 	remediations map[string]domain.RemediationRequest
+	resources    []domain.Resource
+	edges        []domain.TopologyEdge
+	changes      []domain.Change
+	health       []domain.HealthEvent
+	silences     []domain.Silence
+	maintenance  []domain.MaintenanceWindow
 	seqYear      int
 	seq          int
 }

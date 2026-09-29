@@ -31,6 +31,6 @@ Prometheus evaluates `deploy/prometheus/rules.yml` and Alertmanager posts to `/a
 | Remediation executor `demo` or `kubernetes` | Wired. Kubernetes reads the in-cluster service account token |
 | Stable anomaly ids and 7 day retention | Wired |
 | API token compared in constant time, webhook token, actor taken from the authenticated principal | Wired when a token is configured |
-| Kubernetes events inside RCA | Not wired. `rca.Pack.K8s` stays empty |
-| Azure Monitor query adapters | Not wired. Azure mode still needs Prometheus, Jaeger, and Loki URLs |
-| Kubernetes Grafana dashboard series | Not collected by the local stack |
+| Kubernetes events inside RCA | Wired when `kubernetes.enabled` and the in-cluster API are set. `internal/kube` fills `rca.Pack.K8s` |
+| Azure Monitor query adapters | Wired in `internal/azure` with httptest coverage. A live subscription was not used |
+| Kubernetes Grafana dashboard series | Local Compose does not run kubeletstats. The kind/Helm agent config is the source of those series |

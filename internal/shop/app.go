@@ -126,6 +126,8 @@ type App struct {
 	Log             *slog.Logger
 	Tracer          trace.Tracer
 	Duration        metric.Float64Histogram
+	Orders          metric.Int64Counter
+	Charge          metric.Float64Histogram
 	Poller          *Poller
 	Client          *http.Client
 	Query           func(ctx context.Context, sql string, args ...any) error
@@ -407,6 +409,9 @@ func (a *App) charge(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.log(ctx, slog.LevelInfo, "charge approved", "order_id", body.OrderID, "amount_cents", body.Amount)
+	if a.Charge != nil && body.Amount > 0 {
+		a.Charge.Record(ctx, float64(body.Amount))
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "auth_code": "ok"})
 }
 
@@ -459,6 +464,9 @@ func (a *App) createOrder(w http.ResponseWriter, r *http.Request) {
 		_ = a.Query(ctx, "INSERT INTO orders (id, sku, qty) VALUES ($1, $2, $3)", orderID, body.SKU, body.Qty)
 	}
 	a.log(ctx, slog.LevelInfo, "order completed", "order_id", orderID, "sku", body.SKU)
+	if a.Orders != nil {
+		a.Orders.Add(ctx, 1, metric.WithAttributes(attribute.String("sku", body.SKU)))
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"order_id": orderID, "status": "paid", "sku": body.SKU, "qty": body.Qty})
 }
 

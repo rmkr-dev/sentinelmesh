@@ -34,7 +34,7 @@ services:
       retries: 20
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.136.0
+    image: otel/opentelemetry-collector-contrib:0.148.0
     command: ["--config=/etc/otel/config.yaml"]
     volumes:
       - ./collectors/otel-collector.yaml:/etc/otel/config.yaml:ro
@@ -117,6 +117,9 @@ services:
       JAEGER_UI_URL: http://localhost:16686
       DEMO_ENABLED: "true"
       AI_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_SERVICE_NAME: sentinelmesh
       AI_PROVIDER: mock
       PLATFORM_WEBHOOK_TOKEN: local-demo-webhook
     ports:
@@ -212,6 +215,13 @@ services:
     depends_on:
       - storefront
     restart: unless-stopped
+
+  pyroscope:
+    image: grafana/pyroscope:1.13.4
+    profiles: ["profiling"]
+    ports:
+      - "4040:4040"
+    command: ["-self-profiling.disable-push"]
 
 volumes:
   pgdata: {}

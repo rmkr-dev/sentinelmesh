@@ -5,6 +5,7 @@ package anomaly
 import (
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
@@ -37,6 +38,9 @@ func Registry() []Detector {
 		RollingWindowDetector{},
 		ThresholdDetector{},
 		RateChangeDetector{},
+		MADDetector{},
+		EWMADetector{},
+		SeasonalDetector{},
 	}
 }
 
@@ -154,6 +158,101 @@ func (RateChangeDetector) Detect(series Series, p Params) ([]domain.Anomaly, err
 	}
 	return []domain.Anomaly{finding(series, "rate_of_change", rate, last.Value, prev.Value, last.Time,
 		fmt.Sprintf("rate of change %.2f exceeds %.2f (from %g to %g)", rate, threshold, prev.Value, last.Value))}, nil
+}
+
+// MADDetector flags the latest point using a robust z-score (median and MAD).
+type MADDetector struct{}
+
+func (MADDetector) Name() string { return "mad" }
+
+func (MADDetector) Detect(series Series, p Params) ([]domain.Anomaly, error) {
+	minPoints := orInt(p.MinPoints, 8)
+	if len(series.Points) < minPoints {
+		return nil, nil
+	}
+	last := series.Points[len(series.Points)-1]
+	base := values(series.Points[:len(series.Points)-1])
+	med := median(base)
+	var devs []float64
+	for _, v := range base {
+		devs = append(devs, math.Abs(v-med))
+	}
+	mad := median(devs)
+	if mad == 0 {
+		return nil, nil
+	}
+	score := 0.6745 * (last.Value - med) / mad
+	limit := orDefault(p.Threshold, 3.5)
+	if math.Abs(score) < limit {
+		return nil, nil
+	}
+	return []domain.Anomaly{finding(series, "mad", score, last.Value, med, last.Time,
+		fmt.Sprintf("robust z-score %.2f exceeds %.2f", score, limit))}, nil
+}
+
+// EWMADetector compares the latest point with an exponentially weighted mean.
+type EWMADetector struct{}
+
+func (EWMADetector) Name() string { return "ewma" }
+
+func (EWMADetector) Detect(series Series, p Params) ([]domain.Anomaly, error) {
+	if len(series.Points) < 5 {
+		return nil, nil
+	}
+	alpha := 0.3
+	mean := series.Points[0].Value
+	var sq float64
+	for _, pt := range series.Points[1 : len(series.Points)-1] {
+		delta := pt.Value - mean
+		mean += alpha * delta
+		sq = (1-alpha)*sq + alpha*delta*delta
+	}
+	std := math.Sqrt(sq)
+	last := series.Points[len(series.Points)-1]
+	limit := orDefault(p.Threshold, 3)
+	if std == 0 || math.Abs(last.Value-mean) < limit*std {
+		return nil, nil
+	}
+	return []domain.Anomaly{finding(series, "ewma", (last.Value-mean)/std, last.Value, mean, last.Time,
+		fmt.Sprintf("value %g is outside the EWMA band around %g", last.Value, mean))}, nil
+}
+
+// SeasonalDetector compares the latest point with the point one season earlier.
+// Season length is Params.Window samples (default 7).
+type SeasonalDetector struct{}
+
+func (SeasonalDetector) Name() string { return "seasonal" }
+
+func (SeasonalDetector) Detect(series Series, p Params) ([]domain.Anomaly, error) {
+	season := orInt(p.Window, 7)
+	if len(series.Points) <= season {
+		return nil, nil
+	}
+	last := series.Points[len(series.Points)-1]
+	prev := series.Points[len(series.Points)-1-season]
+	if prev.Value == 0 {
+		return nil, nil
+	}
+	delta := (last.Value - prev.Value) / math.Abs(prev.Value)
+	limit := orDefault(p.Threshold, 0.5)
+	if math.Abs(delta) < limit {
+		return nil, nil
+	}
+	return []domain.Anomaly{finding(series, "seasonal", delta, last.Value, prev.Value, last.Time,
+		fmt.Sprintf("seasonal change %.2f versus %d samples earlier", delta, season))}, nil
+}
+
+func median(vs []float64) float64 {
+	if len(vs) == 0 {
+		return 0
+	}
+	cp := append([]float64{}, vs...)
+	sort.Float64s(cp)
+	n := len(cp)
+	if n%2 == 1 {
+		return cp[n/2]
+	}
+	return (cp[n/2-1] + cp[n/2]) / 2
 }
 
 func finding(series Series, detector string, score, value, baseline float64, at time.Time, summary string) domain.Anomaly {

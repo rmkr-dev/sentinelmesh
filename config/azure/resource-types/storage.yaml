@@ -1,0 +1,10 @@
+type: Microsoft.Storage/storageAccounts
+signals:
+  - metric: Availability
+    slo: availability
+  - metric: Transactions
+    dimensions: [ResponseType, ApiName]
+    anomaly: threshold
+    note: ServerBusyError and ClientThrottlingError are throttling
+  - metric: SuccessE2ELatency
+    anomaly: ewma

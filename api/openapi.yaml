@@ -145,6 +145,35 @@ paths:
       responses:
         "200":
           description: Enabled
+  /api/v1/alerts/azure-monitor:
+    post:
+      summary: Ingest an Azure Monitor common alert schema payload
+      responses:
+        "202":
+          description: accepted
+  /api/v1/resources:
+    get:
+      summary: List inventoried resources
+      responses:
+        "200":
+          description: resources
+  /api/v1/topology:
+    get:
+      summary: Service and infrastructure edges
+      responses:
+        "200":
+          description: topology
+  /api/v1/silences:
+    get:
+      summary: List silences
+      responses:
+        "200":
+          description: silences
+    post:
+      summary: Create a silence
+      responses:
+        "201":
+          description: created
   /api/v1/alerts/webhook:
     post:
       summary: Alertmanager webhook

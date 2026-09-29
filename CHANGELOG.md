@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Shared telemetry bootstrap with runtime and host metrics, sampler, database spans, and optional Pyroscope.
+- Kubernetes read-only adapter, multi-hop topology, alert noise control, robust anomaly detectors, and ranked hypotheses.
+- Azure Resource Graph, Log Analytics, Azure Monitor PromQL, common alert schema, and a subscription-free replay.
+- Versioned SQL migrations, advisory-lock leader election, OIDC role helpers, and escaped investigation UI output.
 - CI grants `security-events: write` to the security job so the reusable workflow can start.
 - Shop services propagate W3C trace context. `OTEL_PROPAGATORS` selects the formats.
 - Stored evidence and the AI evidence pack are redacted with the configured policy.

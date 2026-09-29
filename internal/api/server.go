@@ -18,6 +18,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rmkr-dev/sentinelmesh/internal/azure"
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
 	"github.com/rmkr-dev/sentinelmesh/internal/engine"
 	"github.com/rmkr-dev/sentinelmesh/internal/faults"
@@ -101,6 +102,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/deployments", s.createDeployment)
 	mux.HandleFunc("GET /api/v1/dependencies", s.dependencies)
 	mux.HandleFunc("POST /api/v1/alerts/webhook", s.alertWebhook)
+	mux.HandleFunc("POST /api/v1/alerts/azure-monitor", s.azureAlert)
+	mux.HandleFunc("GET /api/v1/resources", s.listResources)
+	mux.HandleFunc("GET /api/v1/topology", s.topology)
+	mux.HandleFunc("GET /api/v1/silences", s.listSilences)
+	mux.HandleFunc("POST /api/v1/silences", s.createSilence)
 	mux.HandleFunc("POST /api/v1/events", s.ingestEvent)
 	mux.HandleFunc("GET /api/v1/runbooks", s.listRunbooks)
 	mux.HandleFunc("GET /api/v1/audit", s.audit)
@@ -213,7 +219,7 @@ func isPublic(path string) bool {
 }
 
 func isWebhook(path string) bool {
-	return path == "/api/v1/alerts/webhook" || path == "/api/v1/events"
+	return path == "/api/v1/alerts/webhook" || path == "/api/v1/alerts/azure-monitor" || path == "/api/v1/events"
 }
 
 func bearerToken(r *http.Request) string {
@@ -614,6 +620,89 @@ func (s *Server) alertWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusAccepted, map[string]int{"accepted": len(payload.Alerts)})
+}
+
+func (s *Server) azureAlert(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	alerts, err := azure.ParseAlerts(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	policy := s.policy()
+	for _, a := range alerts {
+		a.Summary = redaction.RedactString(policy, a.Summary)
+		a.Labels = redaction.RedactAttributes(policy, a.Labels)
+		if err := s.Store.SaveAlert(r.Context(), a); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusAccepted, map[string]int{"accepted": len(alerts)})
+}
+
+func (s *Server) listResources(w http.ResponseWriter, r *http.Request) {
+	items, err := s.Store.ListResources(r.Context(), r.URL.Query().Get("type"), r.URL.Query().Get("service"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if items == nil {
+		items = []domain.Resource{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"resources": items})
+}
+
+func (s *Server) topology(w http.ResponseWriter, r *http.Request) {
+	edges, err := s.Store.ListEdges(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	services, _ := s.Store.ListServices(r.Context())
+	if edges == nil {
+		edges = []domain.TopologyEdge{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"services": nonNil(services), "edges": edges})
+}
+
+func (s *Server) listSilences(w http.ResponseWriter, r *http.Request) {
+	items, err := s.Store.ListSilences(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if items == nil {
+		items = []domain.Silence{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"silences": items})
+}
+
+func (s *Server) createSilence(w http.ResponseWriter, r *http.Request) {
+	var body domain.Silence
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.ID == "" {
+		body.ID = newID("sil")
+	}
+	if body.Owner == "" {
+		body.Owner = actor(r)
+	}
+	if body.CreatedAt.IsZero() {
+		body.CreatedAt = time.Now().UTC()
+	}
+	if err := s.Store.SaveSilence(r.Context(), body); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.recordAudit(r.Context(), "silence.create", body.ID, body.Reason, false)
+	writeJSON(w, http.StatusCreated, body)
 }
 
 func (s *Server) ingestEvent(w http.ResponseWriter, r *http.Request) {
