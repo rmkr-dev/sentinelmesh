@@ -55,22 +55,23 @@ func (c Client) collect(ctx context.Context, now time.Time) (Snapshot, error) {
 	if err != nil {
 		return snap, err
 	}
+	pods, err := c.get(ctx, "/api/v1/pods")
+	if err != nil {
+		return snap, err
+	}
+	events = bindEventServices(events, pods, c.ServiceLabel)
 	snap.Events = events
 	for _, ev := range events {
-		if !symptomReason(ev.Reason) {
+		if !symptomReason(ev.Reason) || ev.Service == "" {
 			continue
 		}
 		snap.Signals = append(snap.Signals, domain.Signal{
 			ID:   "k8s-" + ev.Namespace + "-" + ev.Object + "-" + ev.Reason,
-			Type: domain.SignalK8s, Service: serviceFromObject(ev.Object, c.ServiceLabel),
+			Type: domain.SignalK8s, Service: ev.Service,
 			Severity: "warning", Summary: ev.Reason + ": " + ev.Message,
 			Fingerprint: "k8s|" + ev.Namespace + "|" + ev.Object + "|" + ev.Reason,
-			OccurredAt:  ev.At, Attributes: map[string]string{"reason": ev.Reason, "namespace": ev.Namespace, "object": ev.Object},
+			OccurredAt:  ev.At, Attributes: map[string]string{"reason": ev.Reason, "namespace": ev.Namespace, "object": ev.Object, "service": ev.Service},
 		})
-	}
-	pods, err := c.get(ctx, "/api/v1/pods")
-	if err != nil {
-		return snap, err
 	}
 	snap.Signals = append(snap.Signals, podSignals(pods, c.ServiceLabel, now)...)
 	nodes, err := c.get(ctx, "/api/v1/nodes")

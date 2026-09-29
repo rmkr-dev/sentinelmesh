@@ -57,7 +57,7 @@ make demo
 | Area | What you get |
 | --- | --- |
 | Telemetry | OTLP traces, metrics, logs, runtime metrics, and optional Pyroscope profiles |
-| Azure | Resource Graph, Log Analytics, Azure Monitor PromQL, common alert schema. Live apply was not run |
+| Azure | Resource Graph, Log Analytics, and the common alert schema are covered by an in-process replay. A subscription apply was not run |
 | Kubernetes | Read-only adapter for warning events, pod symptoms, and rollout changes |
 | SRE | SLOs, error budgets, multi-window burn rates, Alertmanager webhook |
 | Detection | z-score, rolling window, threshold, rate-of-change |

@@ -29,8 +29,8 @@ test-unit: ## Unit tests
 test-integration: ## Postgres integration tests. Skips when DATABASE_URL is empty.
 	go test -tags=integration ./...
 
-test-e2e-azure-replay: ## Azure fixture replay, no subscription
-	go test ./internal/replay/
+test-e2e-azure-replay: ## Azure and Kubernetes scenarios through the API and engine
+	go test -count=1 ./internal/e2e/
 
 test-e2e-kind: ## Kind cluster scenario. Requires kind and helm.
 	./scripts/e2e-kind.sh

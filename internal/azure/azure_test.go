@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rmkr-dev/sentinelmesh/internal/domain"
 )
 
 func TestInventoryAndPromQL(t *testing.T) {
@@ -44,8 +46,17 @@ func TestInventoryAndPromQL(t *testing.T) {
 func TestParseCommonAlert(t *testing.T) {
 	body := []byte(`{"schemaId":"azureMonitorCommonAlertSchema","data":{"essentials":{"alertId":"a1","alertRule":"storage-throttle","severity":"Sev2","signalType":"Metric","monitorCondition":"Fired","alertTargetIDs":["/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/demo/providers/Microsoft.Storage/storageAccounts/shopsa"],"firedDateTime":"2026-09-29T12:00:00Z","description":"throttled"}}}`)
 	alerts, err := ParseAlerts(body)
-	if err != nil || len(alerts) != 1 || alerts[0].Status != "firing" || alerts[0].Service != "shopsa" {
+	if err != nil || len(alerts) != 1 || alerts[0].Status != "firing" || alerts[0].Service != "" || alerts[0].Severity != "warning" {
 		t.Fatalf("%+v %v", alerts, err)
+	}
+	bound := BindService(alerts[0], []domain.Service{{
+		Name: "shopsa",
+		Attributes: map[string]string{
+			"azure.resource_ids": alerts[0].Labels["resource_id"],
+		},
+	}})
+	if bound.Service != "shopsa" {
+		t.Fatalf("bind %+v", bound)
 	}
 	rows := ChangesFromActivity([]map[string]any{{
 		"OperationNameValue":  "Microsoft.Storage/storageAccounts/write",

@@ -1,0 +1,17 @@
+{
+  "schemaId": "azureMonitorCommonAlertSchema",
+  "data": {
+    "essentials": {
+      "alertId": "alert-storage-throttle",
+      "alertRule": "storage-throttle",
+      "severity": "Sev2",
+      "signalType": "Metric",
+      "monitorCondition": "Fired",
+      "alertTargetIDs": [
+        "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/demo/providers/Microsoft.Storage/storageAccounts/shopsa"
+      ],
+      "firedDateTime": "2026-09-29T12:03:00Z",
+      "description": "Storage account shopsa is throttling"
+    }
+  }
+}

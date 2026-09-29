@@ -11,10 +11,22 @@ import (
 
 // NormalizeFingerprint drops volatile labels so one problem stays one alert.
 func NormalizeFingerprint(a domain.Alert) string {
-	if a.Fingerprint != "" && !strings.Contains(a.Fingerprint, "pod") {
-		return a.Name + "|" + a.Service
+	resourceID := ""
+	if a.Labels != nil {
+		resourceID = a.Labels["resource_id"]
 	}
-	return a.Name + "|" + a.Service
+	parts := []string{a.Name, a.Service, resourceID}
+	var extra []string
+	for k, v := range a.Labels {
+		switch k {
+		case "pod", "instance", "replica", "resource_id", "service", "alertname", "severity":
+			continue
+		default:
+			extra = append(extra, k+"="+v)
+		}
+	}
+	sort.Strings(extra)
+	return strings.Join(append(parts, extra...), "|")
 }
 
 // Flapping is true when the same fingerprint changed state at least n times in the window.
@@ -75,7 +87,7 @@ func match(want, got map[string]string) bool {
 		return false
 	}
 	for k, v := range want {
-		if got[k] != v && got["service"] != v && got["alertname"] != v {
+		if got[k] != v {
 			return false
 		}
 	}

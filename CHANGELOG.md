@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- End-to-end tests drive the API and engine: a storage alert, function errors, a change, and resource health become one incident; a silence blocks that alert; Kubernetes evidence is limited to the matching service.
 - Shared telemetry bootstrap with runtime and host metrics, sampler, database spans, and optional Pyroscope.
 - Kubernetes read-only adapter, multi-hop topology, alert noise control, robust anomaly detectors, and ranked hypotheses.
 - Azure Resource Graph, Log Analytics, Azure Monitor PromQL, common alert schema, and a subscription-free replay.

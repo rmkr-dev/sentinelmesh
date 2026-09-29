@@ -40,27 +40,52 @@ func ParseAlerts(body []byte) ([]domain.Alert, error) {
 	if len(ess.TargetIDs) > 0 {
 		target = ess.TargetIDs[0]
 	}
-	service := serviceFromResourceID(target)
 	id := ess.AlertID
 	if id == "" {
 		id = ess.AlertRule + "|" + target
 	}
 	return []domain.Alert{{
-		ID: id, Fingerprint: id, Name: ess.AlertRule, Service: service, Severity: ess.Severity,
+		ID: id, Fingerprint: id, Name: ess.AlertRule, Service: "", Severity: platformSeverity(ess.Severity),
 		Status: status, Summary: ess.Description, StartsAt: ess.FiredTime,
 		Labels: map[string]string{
-			"signal_type": ess.SignalType,
-			"resource_id": target,
-			"alert_rule":  ess.AlertRule,
+			"signal_type":    ess.SignalType,
+			"resource_id":    strings.ToLower(target),
+			"alert_rule":     ess.AlertRule,
+			"azure_severity": ess.Severity,
 		},
 	}}, nil
 }
 
-func serviceFromResourceID(id string) string {
-	id = strings.Trim(id, "/")
-	if id == "" {
-		return ""
+func platformSeverity(sev string) string {
+	switch strings.ToLower(sev) {
+	case "sev0", "sev1":
+		return "critical"
+	case "sev2", "sev3":
+		return "warning"
+	case "sev4":
+		return "info"
+	default:
+		return "warning"
 	}
-	parts := strings.Split(id, "/")
-	return parts[len(parts)-1]
+}
+
+// BindService sets the catalog service when azure.resource_ids contains the alert target.
+// An unbound alert keeps an empty service so it cannot match every Kubernetes object.
+func BindService(alert domain.Alert, services []domain.Service) domain.Alert {
+	target := strings.ToLower(alert.Labels["resource_id"])
+	if target == "" {
+		return alert
+	}
+	for _, svc := range services {
+		raw := svc.Attributes["azure.resource_ids"]
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.ToLower(strings.TrimSpace(part))
+			if part != "" && part == target {
+				alert.Service = svc.Name
+				return alert
+			}
+		}
+	}
+	alert.Service = ""
+	return alert
 }

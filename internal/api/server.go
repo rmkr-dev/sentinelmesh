@@ -634,7 +634,9 @@ func (s *Server) azureAlert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	policy := s.policy()
+	services, _ := s.Store.ListServices(r.Context())
 	for _, a := range alerts {
+		a = azure.BindService(a, services)
 		a.Summary = redaction.RedactString(policy, a.Summary)
 		a.Labels = redaction.RedactAttributes(policy, a.Labels)
 		if err := s.Store.SaveAlert(r.Context(), a); err != nil {
