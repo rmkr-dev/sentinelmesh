@@ -15,17 +15,17 @@ func TestOverlayAndSLOLoad(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "slo"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "base.yaml"), []byte("http:\n  addr: \":8080\"\nai:\n  provider: mock\n  temperature: 0\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "base.yaml"), []byte("http:\n  addr: \":8080\"\nai:\n  provider: \"\"\n  temperature: 0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "environments", "local.yaml"), []byte("ai:\n  provider: mock\ndemo:\n  enabled: true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "environments", "local.yaml"), []byte("ai:\n  enabled: false\ndemo:\n  enabled: true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(dir, "local")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HTTP.Addr != ":8080" || !cfg.Demo.Enabled || cfg.AI.Provider != "mock" {
+	if cfg.HTTP.Addr != ":8080" || !cfg.Demo.Enabled || cfg.AI.Enabled {
 		t.Fatalf("%+v", cfg)
 	}
 	sloBody := []byte("service: payment-service\nslos:\n  availability:\n    target: 99.95%\n  latency:\n    target: 99%\n    threshold_ms: 500\n    windows: [1m, 5m]\n")

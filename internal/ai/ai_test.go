@@ -67,14 +67,31 @@ func TestMergeDropsInventedEvidenceAndConfirmation(t *testing.T) {
 	}
 }
 
-func TestMockDoesNotInvent(t *testing.T) {
+type narrativeProvider struct{}
+
+func (narrativeProvider) Name() string { return "narrative" }
+
+func (narrativeProvider) Analyze(_ context.Context, pack domain.EvidencePack) (domain.Analysis, error) {
+	base := domain.Analysis{}
+	if pack.Analysis != nil {
+		base = *pack.Analysis
+	}
+	if base.Summary == "" {
+		base.Summary = "No deterministic summary was available."
+	}
+	base.AIGenerated = true
+	base.GeneratedAt = time.Now().UTC()
+	return base, nil
+}
+
+func TestNarrativeKeepsDeterministicSummary(t *testing.T) {
 	base := domain.Analysis{
 		Summary: "Strong correlation detected.", ConfidenceLabel: domain.GradeStronglyCorrelated,
 		Evidence: []domain.Evidence{}, Hypotheses: []domain.Hypothesis{},
 		RecommendedActions: []domain.RecommendedAction{}, MissingEvidence: []string{"traces"},
 		Timeline: []domain.TimelineEntry{},
 	}
-	got, err := MockProvider{}.Analyze(context.Background(), domain.EvidencePack{Analysis: &base})
+	got, err := narrativeProvider{}.Analyze(context.Background(), domain.EvidencePack{Analysis: &base})
 	if err != nil {
 		t.Fatal(err)
 	}

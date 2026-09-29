@@ -2,14 +2,12 @@ package telemetry
 
 import (
 	"testing"
-
-	"go.opentelemetry.io/otel/sdk/trace"
 )
 
 func TestSamplerFromEnv(t *testing.T) {
 	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
 	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "")
-	if _, ok := samplerFromEnv().(trace.Sampler); !ok {
+	if samplerFromEnv() == nil {
 		t.Fatal("sampler")
 	}
 	t.Setenv("OTEL_TRACES_SAMPLER", "traceidratio")

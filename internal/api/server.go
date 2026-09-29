@@ -16,8 +16,12 @@ import (
 	"strings"
 	"time"
 
+	"strconv"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rmkr-dev/sentinelmesh/internal/alerting"
+	"github.com/rmkr-dev/sentinelmesh/internal/auth"
 	"github.com/rmkr-dev/sentinelmesh/internal/azure"
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
 	"github.com/rmkr-dev/sentinelmesh/internal/engine"
@@ -29,26 +33,32 @@ import (
 	"github.com/rmkr-dev/sentinelmesh/internal/runbook"
 	"github.com/rmkr-dev/sentinelmesh/internal/slo"
 	"github.com/rmkr-dev/sentinelmesh/internal/store"
+	"github.com/rmkr-dev/sentinelmesh/internal/topology"
 	"github.com/rmkr-dev/sentinelmesh/internal/version"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Server serves the platform API and the investigation UI.
 type Server struct {
-	Store        store.Store
-	Engine       *engine.Engine
-	Runbooks     []runbook.Runbook
-	Gate         remediation.Gate
-	Executor     remediation.Executor
-	Demo         bool
-	Token        string
-	WebhookToken string
-	Principals   []Principal
-	Redaction    redaction.Policy
-	WebDir       string
-	Log          *slog.Logger
-	GrafanaURL   string
-	JaegerURL    string
-	metrics      *metrics
+	Store             store.Store
+	Engine            *engine.Engine
+	Runbooks          []runbook.Runbook
+	Gate              remediation.Gate
+	Executor          remediation.Executor
+	Demo              bool
+	Environment       string
+	HonorActorHeader  bool
+	Token             string
+	WebhookToken      string
+	Principals        []Principal
+	OIDC              *auth.Verifier
+	CorrelationWindow time.Duration
+	Redaction         redaction.Policy
+	WebDir            string
+	Log               *slog.Logger
+	GrafanaURL        string
+	JaegerURL         string
+	metrics           *metrics
 }
 
 type metrics struct {
@@ -133,16 +143,58 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-		name, ok := s.authorize(r)
+		rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
+		name, role, ok := s.authorize(r)
 		if !ok {
-			writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+			s.count(r, http.StatusUnauthorized)
+			writeError(rec, http.StatusUnauthorized, "missing or invalid bearer token")
+			s.accessLog(r, http.StatusUnauthorized)
+			return
+		}
+		if name != "" && !s.allow(r, role) {
+			s.count(r, http.StatusForbidden)
+			writeError(rec, http.StatusForbidden, "forbidden")
+			s.accessLog(r, http.StatusForbidden)
 			return
 		}
 		if name != "" {
 			r = r.WithContext(context.WithValue(r.Context(), actorContextKey{}, name))
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(rec, r)
+		if span := trace.SpanFromContext(r.Context()); span.IsRecording() && r.Pattern != "" {
+			span.SetName(r.Method + " " + r.Pattern)
+		}
+		s.count(r, rec.code)
+		s.accessLog(r, rec.code)
 	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	code int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.code = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *Server) count(r *http.Request, code int) {
+	if s.metrics == nil {
+		return
+	}
+	pattern := r.Pattern
+	if pattern == "" {
+		pattern = r.URL.Path
+	}
+	s.metrics.requests.WithLabelValues(pattern, strconv.Itoa(code)).Inc()
+}
+
+func (s *Server) accessLog(r *http.Request, code int) {
+	if s.Log == nil {
+		return
+	}
+	s.Log.Info("request", "method", r.Method, "path", r.URL.Path, "status", code)
 }
 
 type actorContextKey struct{}
@@ -151,19 +203,35 @@ type actorContextKey struct{}
 type Principal struct {
 	Name        string
 	Token       string
+	Role        string
 	WebhookOnly bool
 }
 
-func (s *Server) authorize(r *http.Request) (string, bool) {
+func (p Principal) role() string {
+	if p.Role != "" {
+		return p.Role
+	}
+	if p.WebhookOnly {
+		return auth.RoleResponder
+	}
+	return auth.RoleAdmin
+}
+
+func (s *Server) authorize(r *http.Request) (string, string, bool) {
 	if isPublic(r.URL.Path) {
-		return "", true
+		return "", "", true
+	}
+	if r.URL.Path == "/api/v1/alerts/azure-monitor" {
+		if name, role, ok := s.authorizeAzure(r); ok {
+			return name, role, true
+		}
+		return "", "", false
 	}
 	if s.routeOpen(r.URL.Path) {
-		return "", true
+		return "", "", true
 	}
 	bearer := bearerToken(r)
 	webhook := isWebhook(r.URL.Path)
-	matched := ""
 	for _, p := range s.principals() {
 		if p.Token == "" || !tokenEqual(bearer, p.Token) {
 			continue
@@ -171,11 +239,84 @@ func (s *Server) authorize(r *http.Request) (string, bool) {
 		if p.WebhookOnly && !webhook {
 			continue
 		}
-		if matched == "" {
-			matched = p.Name
+		return p.Name, p.role(), true
+	}
+	if s.OIDC != nil && bearer != "" {
+		p, err := s.OIDC.Verify(r.Context(), bearer)
+		if err == nil {
+			role := auth.RoleViewer
+			if len(p.Roles) > 0 {
+				role = p.Roles[0]
+			}
+			return p.Name, role, true
 		}
 	}
-	return matched, matched != ""
+	return "", "", false
+}
+
+func (s *Server) authorizeAzure(r *http.Request) (string, string, bool) {
+	q := r.URL.Query()
+	queryToken := q.Get("token")
+	if queryToken != "" {
+		q.Del("token")
+		r.URL.RawQuery = q.Encode()
+		for _, p := range s.principals() {
+			if p.Token != "" && tokenEqual(queryToken, p.Token) {
+				return p.Name, p.role(), true
+			}
+		}
+		return "", "", false
+	}
+	bearer := bearerToken(r)
+	if s.OIDC != nil && bearer != "" {
+		p, err := s.OIDC.Verify(r.Context(), bearer)
+		if err == nil {
+			role := auth.RoleResponder
+			if len(p.Roles) > 0 {
+				role = p.Roles[0]
+			}
+			return p.Name, role, true
+		}
+	}
+	for _, p := range s.principals() {
+		if p.Token != "" && tokenEqual(bearer, p.Token) {
+			return p.Name, p.role(), true
+		}
+	}
+	if s.routeOpen(r.URL.Path) {
+		return "", "", true
+	}
+	return "", "", false
+}
+
+func (s *Server) allow(r *http.Request, role string) bool {
+	if isPublic(r.URL.Path) || isWebhook(r.URL.Path) {
+		return true
+	}
+	if role == "" {
+		return true
+	}
+	return auth.Allow([]string{role}, routeAction(r))
+}
+
+func routeAction(r *http.Request) string {
+	path := r.URL.Path
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return "read"
+	}
+	if strings.HasSuffix(path, "/decision") {
+		return "approve"
+	}
+	if path == "/api/v1/services" {
+		return "catalog"
+	}
+	if strings.HasPrefix(path, "/api/v1/incidents") || path == "/api/v1/silences" {
+		return "silence"
+	}
+	if path == "/api/v1/remediations" {
+		return "silence"
+	}
+	return "admin"
 }
 
 func (s *Server) principals() []Principal {
@@ -266,7 +407,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) meta(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":        "cloud-observability-aiops-platform",
+		"name":        "SentinelMesh",
 		"version":     version.Version,
 		"grafana_url": s.GrafanaURL,
 		"jaeger_url":  s.JaegerURL,
@@ -326,7 +467,7 @@ func (s *Server) listSLOs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.publishSLO(results)
+	s.PublishSLO(results)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"definitions": defsOrEmpty(defs),
 		"results":     resultsOrEmpty(results),
@@ -357,6 +498,7 @@ func (s *Server) tick(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.PublishSLO(s.Engine.LastResults)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "dependencies": s.Engine.Health()})
 }
 
@@ -391,7 +533,7 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "engine is not configured")
 		return
 	}
-	inc, err := s.Engine.AnalyzeIncident(r.Context(), r.PathValue("id"), actor(r))
+	inc, err := s.Engine.AnalyzeIncident(r.Context(), r.PathValue("id"), s.actor(r))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "incident not found")
 		return
@@ -459,7 +601,7 @@ func (s *Server) transition(w http.ResponseWriter, r *http.Request) {
 		inc.ResolvedAt = &now
 	}
 	inc.Events = append(inc.Events, domain.TimelineEntry{
-		ID: newID("tl"), At: now, Kind: "status", Actor: actor(r),
+		ID: newID("tl"), At: now, Kind: "status", Actor: s.actor(r),
 		Message: fmt.Sprintf("Status changed to %s. %s", body.Status, body.Reason),
 	})
 	if err := s.Store.SaveIncident(r.Context(), inc); err != nil {
@@ -546,7 +688,7 @@ func (s *Server) createDeployment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dependencies(w http.ResponseWriter, r *http.Request) {
-	services, err := s.Store.ListServices(r.Context())
+	_, edges, err := s.mergedGraph(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -560,66 +702,100 @@ func (s *Server) dependencies(w http.ResponseWriter, r *http.Request) {
 	for name, rows := range byService {
 		statusOf[name] = slo.OverallStatus(rows)
 	}
-	var edges []domain.DependencyEdge
-	for _, svc := range services {
-		for _, dep := range svc.Dependencies {
-			st := statusOf[dep]
-			if st == "" {
-				st = "unknown"
-			}
-			edges = append(edges, domain.DependencyEdge{From: svc.Name, To: dep, Status: st, Source: "catalog"})
+	var deps []domain.DependencyEdge
+	for _, e := range edges {
+		st := statusOf[e.To]
+		if st == "" {
+			st = e.Status
 		}
+		if st == "" {
+			st = "unknown"
+		}
+		deps = append(deps, domain.DependencyEdge{From: e.From, To: e.To, Status: st, Source: e.Source, Detail: e.Detail})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"dependencies": edgesOrEmpty(edges)})
+	writeJSON(w, http.StatusOK, map[string]any{"dependencies": edgesOrEmpty(deps)})
+}
+
+type alertmanagerPayload struct {
+	Version           string              `json:"version"`
+	GroupKey          string              `json:"groupKey"`
+	TruncatedAlerts   int                 `json:"truncatedAlerts"`
+	Status            string              `json:"status"`
+	Receiver          string              `json:"receiver"`
+	GroupLabels       map[string]string   `json:"groupLabels"`
+	CommonLabels      map[string]string   `json:"commonLabels"`
+	CommonAnnotations map[string]string   `json:"commonAnnotations"`
+	ExternalURL       string              `json:"externalURL"`
+	Alerts            []alertmanagerAlert `json:"alerts"`
+}
+
+type alertmanagerAlert struct {
+	Status       string            `json:"status"`
+	Labels       map[string]string `json:"labels"`
+	Annotations  map[string]string `json:"annotations"`
+	StartsAt     time.Time         `json:"startsAt"`
+	EndsAt       time.Time         `json:"endsAt"`
+	GeneratorURL string            `json:"generatorURL"`
+	Fingerprint  string            `json:"fingerprint"`
 }
 
 func (s *Server) alertWebhook(w http.ResponseWriter, r *http.Request) {
-	var payload struct {
-		Alerts []struct {
-			Status      string            `json:"status"`
-			Labels      map[string]string `json:"labels"`
-			Annotations map[string]string `json:"annotations"`
-			StartsAt    time.Time         `json:"startsAt"`
-			EndsAt      time.Time         `json:"endsAt"`
-			Fingerprint string            `json:"fingerprint"`
-		} `json:"alerts"`
-	}
+	var payload alertmanagerPayload
 	if err := readJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	policy := s.policy()
 	for _, a := range payload.Alerts {
-		service := a.Labels["service"]
-		if service == "" {
-			service = a.Labels["service_name"]
-		}
-		name := a.Labels["alertname"]
-		id := a.Fingerprint
-		if id == "" {
-			id = newID("alrt")
-		}
-		summary := a.Annotations["summary"]
-		if summary == "" {
-			summary = a.Annotations["description"]
-		}
-		policy := s.policy()
-		summary = redaction.RedactString(policy, summary)
-		a.Labels = redaction.RedactAttributes(policy, a.Labels)
-		a.Annotations = redaction.RedactAttributes(policy, a.Annotations)
-		var ends *time.Time
-		if !a.EndsAt.IsZero() {
-			ends = &a.EndsAt
-		}
-		if err := s.Store.SaveAlert(r.Context(), domain.Alert{
-			ID: id, Fingerprint: id, Name: name, Service: service, Severity: a.Labels["severity"],
-			Status: a.Status, Summary: summary, StartsAt: a.StartsAt, EndsAt: ends,
-			Labels: a.Labels, Annotations: a.Annotations,
-		}); err != nil {
+		alert := s.normalizeWebhookAlert(policy, a)
+		if err := s.Store.SaveAlert(r.Context(), alert); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
 	writeJSON(w, http.StatusAccepted, map[string]int{"accepted": len(payload.Alerts)})
+}
+
+func (s *Server) normalizeWebhookAlert(policy redaction.Policy, a alertmanagerAlert) domain.Alert {
+	service := a.Labels["service"]
+	if service == "" {
+		service = a.Labels["service_name"]
+	}
+	name := a.Labels["alertname"]
+	summary := a.Annotations["summary"]
+	if summary == "" {
+		summary = a.Annotations["description"]
+	}
+	summary = redaction.RedactString(policy, summary)
+	labels := redactLabelSet(policy, a.Labels)
+	annotations := redactLabelSet(policy, a.Annotations)
+	var ends *time.Time
+	status := a.Status
+	if status == "" {
+		status = "firing"
+	}
+	if status == "resolved" || !a.EndsAt.IsZero() && status == "resolved" {
+		t := a.EndsAt
+		if t.IsZero() {
+			t = time.Now().UTC()
+		}
+		ends = &t
+		status = "resolved"
+	} else if !a.EndsAt.IsZero() && status != "firing" {
+		t := a.EndsAt
+		ends = &t
+	}
+	alert := domain.Alert{
+		Name: name, Service: service, Severity: labels["severity"],
+		Status: status, Summary: summary, StartsAt: a.StartsAt, EndsAt: ends,
+		Labels: labels, Annotations: annotations,
+	}
+	alert.Fingerprint = alerting.NormalizeFingerprint(alert)
+	alert.ID = stableAlertID("alertmanager", alert)
+	if a.Fingerprint != "" {
+		alert.Labels["alertmanager_fingerprint"] = a.Fingerprint
+	}
+	return alert
 }
 
 func (s *Server) azureAlert(w http.ResponseWriter, r *http.Request) {
@@ -638,7 +814,12 @@ func (s *Server) azureAlert(w http.ResponseWriter, r *http.Request) {
 	for _, a := range alerts {
 		a = azure.BindService(a, services)
 		a.Summary = redaction.RedactString(policy, a.Summary)
-		a.Labels = redaction.RedactAttributes(policy, a.Labels)
+		a.Labels = redactLabelSet(policy, a.Labels)
+		a.Annotations = redactLabelSet(policy, a.Annotations)
+		if a.Fingerprint == "" {
+			a.Fingerprint = alerting.NormalizeFingerprint(a)
+		}
+		a.ID = stableAlertID("azure-monitor", a)
 		if err := s.Store.SaveAlert(r.Context(), a); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -660,16 +841,29 @@ func (s *Server) listResources(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) topology(w http.ResponseWriter, r *http.Request) {
-	edges, err := s.Store.ListEdges(r.Context())
+	services, edges, err := s.mergedGraph(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	services, _ := s.Store.ListServices(r.Context())
 	if edges == nil {
 		edges = []domain.TopologyEdge{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"services": nonNil(services), "edges": edges})
+}
+
+func (s *Server) mergedGraph(ctx context.Context) ([]domain.Service, []domain.TopologyEdge, error) {
+	services, err := s.Store.ListServices(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	stored, err := s.Store.ListEdges(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	now := time.Now().UTC()
+	merged := topology.Merge(stored, topology.FromCatalog(services, now), now, 0)
+	return services, merged, nil
 }
 
 func (s *Server) listSilences(w http.ResponseWriter, r *http.Request) {
@@ -693,8 +887,17 @@ func (s *Server) createSilence(w http.ResponseWriter, r *http.Request) {
 	if body.ID == "" {
 		body.ID = newID("sil")
 	}
-	if body.Owner == "" {
-		body.Owner = actor(r)
+	body.Owner = s.actor(r)
+	if body.StartsAt.IsZero() {
+		body.StartsAt = time.Now().UTC()
+	}
+	if len(body.Matchers) == 0 {
+		writeError(w, http.StatusBadRequest, "matchers are required")
+		return
+	}
+	if !body.EndsAt.After(body.StartsAt) {
+		writeError(w, http.StatusBadRequest, "ends_at must be after starts_at")
+		return
 	}
 	if body.CreatedAt.IsZero() {
 		body.CreatedAt = time.Now().UTC()
@@ -727,21 +930,43 @@ func (s *Server) ingestEvent(w http.ResponseWriter, r *http.Request) {
 	if body.OccurredAt.IsZero() {
 		body.OccurredAt = time.Now().UTC()
 	}
-	id := newID("evt")
-	policy := s.policy()
-	labels := redaction.RedactAttributes(policy, body.Attributes)
-	if labels == nil {
-		labels = map[string]string{}
+	if body.Type == "" {
+		writeError(w, http.StatusBadRequest, "type is required")
+		return
 	}
-	labels["signal_type"] = body.Type
-	if err := s.Store.SaveAlert(r.Context(), domain.Alert{
-		ID: id, Fingerprint: id, Name: body.Type, Service: body.Service, Severity: body.Severity,
-		Status: "firing", Summary: redaction.RedactString(policy, body.Summary), StartsAt: body.OccurredAt, Labels: labels,
-	}); err != nil {
+	policy := s.policy()
+	attrs := redactLabelSet(policy, body.Attributes)
+	switch body.Type {
+	case "deployment", "change", "config":
+		ch := domain.Change{
+			ID:   stableEventID(body.Type, body.Service, body.Summary, body.OccurredAt),
+			Kind: body.Type, Source: "event", Target: body.Service, Actor: s.actor(r),
+			OccurredAt: body.OccurredAt, Attributes: attrs,
+		}
+		if err := s.Store.SaveChange(r.Context(), ch); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"id": ch.ID, "stored": "change"})
+		return
+	}
+	window := s.CorrelationWindow
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	ends := body.OccurredAt.Add(window)
+	alert := domain.Alert{
+		Name: body.Type, Service: body.Service, Severity: body.Severity,
+		Status: "firing", Summary: redaction.RedactString(policy, body.Summary),
+		StartsAt: body.OccurredAt, EndsAt: &ends, Labels: attrs,
+	}
+	alert.Fingerprint = alerting.NormalizeFingerprint(alert)
+	alert.ID = stableAlertID("event", alert)
+	if err := s.Store.SaveAlert(r.Context(), alert); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"id": id})
+	writeJSON(w, http.StatusAccepted, map[string]string{"id": alert.ID, "stored": "alert"})
 }
 
 func (s *Server) listRunbooks(w http.ResponseWriter, r *http.Request) {
@@ -753,8 +978,12 @@ func (s *Server) listRunbooks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) recordAudit(ctx context.Context, action, target, reason string, ai bool) {
+	name := "system"
+	if v, ok := ctx.Value(actorContextKey{}).(string); ok && v != "" {
+		name = v
+	}
 	_ = s.Store.AddAudit(ctx, domain.AuditEvent{
-		ID: newID("audit"), At: time.Now().UTC(), Actor: "api", Action: action, Target: target, Reason: reason, AIGenerated: ai,
+		ID: newID("audit"), At: time.Now().UTC(), Actor: name, Action: action, Target: target, Reason: reason, AIGenerated: ai,
 	})
 }
 
@@ -808,7 +1037,7 @@ func (s *Server) enableFault(w http.ResponseWriter, r *http.Request) {
 	if spec.Name == "deployment-regression" {
 		_ = s.Store.CreateDeployment(r.Context(), domain.Deployment{
 			ID: newID("dep"), Service: spec.Service, Version: "v1.8.2", Environment: "local",
-			GitSHA: "badbad1", Repository: "github.com/rmkr-dev/sentinelmesh", Author: actor(r), Timestamp: now,
+			GitSHA: "badbad1", Repository: "github.com/rmkr-dev/sentinelmesh", Author: s.actor(r), Timestamp: now,
 			Metadata: map[string]string{"change": "deployment-regression"},
 		})
 	}
@@ -831,7 +1060,7 @@ func (s *Server) disableFault(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		_ = s.Store.CreateDeployment(r.Context(), domain.Deployment{
 			ID: newID("dep"), Service: spec.Service, Version: "v1.8.3", Environment: "local",
-			GitSHA: "good123", Repository: "github.com/rmkr-dev/sentinelmesh", Author: actor(r), Timestamp: now,
+			GitSHA: "good123", Repository: "github.com/rmkr-dev/sentinelmesh", Author: s.actor(r), Timestamp: now,
 			Metadata: map[string]string{"change": "rollback"},
 		})
 	}
@@ -861,7 +1090,7 @@ func (s *Server) createRemediation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	req, err := s.Gate.NewRequest(body.Action, body.Target, body.Reason, actor(r), body.IncidentID, time.Now().UTC())
+	req, err := s.Gate.NewRequest(body.Action, body.Target, body.Reason, s.actor(r), body.IncidentID, time.Now().UTC())
 	if err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
@@ -903,7 +1132,7 @@ func (s *Server) decideRemediation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	req, err = remediation.Approve(req, actor(r), body.Approve, time.Now().UTC())
+	req, err = remediation.Approve(req, s.actor(r), body.Approve, time.Now().UTC())
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -928,7 +1157,8 @@ func (s *Server) decideRemediation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, req)
 }
 
-func (s *Server) publishSLO(results []domain.SLOResult) {
+// PublishSLO records the latest SLO status gauges.
+func (s *Server) PublishSLO(results []domain.SLOResult) {
 	if s.metrics == nil {
 		return
 	}
@@ -958,14 +1188,50 @@ func rollup(results []domain.SLOResult) map[string]string {
 	return out
 }
 
-func actor(r *http.Request) string {
+func principalName(r *http.Request) string {
 	if name, ok := r.Context().Value(actorContextKey{}).(string); ok && name != "" {
 		return name
 	}
-	if a := strings.TrimSpace(r.Header.Get("X-Actor")); a != "" {
-		return a
+	return "api"
+}
+
+func (s *Server) actor(r *http.Request) string {
+	if name := principalName(r); name != "api" {
+		return name
+	}
+	if s.HonorActorHeader {
+		if a := strings.TrimSpace(r.Header.Get("X-Actor")); a != "" {
+			return a
+		}
 	}
 	return "api"
+}
+
+func redactLabelSet(policy redaction.Policy, in map[string]string) map[string]string {
+	if in == nil {
+		in = map[string]string{}
+	}
+	out := redaction.RedactHeaders(policy, redaction.RedactAttributes(policy, in))
+	if out == nil {
+		out = map[string]string{}
+	}
+	for k, v := range out {
+		lk := strings.ToLower(k)
+		if lk == "url.query" || lk == "url.full" || strings.HasPrefix(lk, "http.request.header.") {
+			out[k] = redaction.RedactQuery(policy, v)
+		}
+	}
+	return out
+}
+
+func stableAlertID(source string, a domain.Alert) string {
+	sum := sha256.Sum256([]byte(source + "|" + alerting.NormalizeFingerprint(a)))
+	return "alrt-" + hex.EncodeToString(sum[:12])
+}
+
+func stableEventID(kind, service, summary string, at time.Time) string {
+	sum := sha256.Sum256([]byte(kind + "|" + service + "|" + summary + "|" + at.UTC().Format(time.RFC3339)))
+	return "evt-" + hex.EncodeToString(sum[:12])
 }
 
 func validName(name string) bool {

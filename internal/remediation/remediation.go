@@ -25,19 +25,6 @@ type Policy struct {
 	Allowed         map[string]bool
 }
 
-// DefaultPolicy matches the safe platform default.
-func DefaultPolicy() Policy {
-	return Policy{
-		Enabled:         false,
-		RequireApproval: true,
-		Allowed: map[string]bool{
-			"restart_pod":         true,
-			"scale_deployment":    true,
-			"rollback_deployment": true,
-		},
-	}
-}
-
 // Executor performs an already-approved action.
 type Executor interface {
 	Execute(ctx context.Context, req domain.RemediationRequest) (before, after map[string]any, err error)

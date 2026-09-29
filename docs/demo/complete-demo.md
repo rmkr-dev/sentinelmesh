@@ -56,7 +56,7 @@ Or use the Analyze button in the UI.
 
 ## 10. AI output
 
-With the default mock provider, the summary is marked `ai_status=completed` only after analyze, and it repeats the deterministic text. It does not add a new cause. If you point `AI_PROVIDER` at a broken URL, analyze still returns the incident with `ai_status=degraded`.
+With `ai.enabled=false`, analyze keeps the deterministic summary and `ai_status` stays `not_requested`. It does not add a new cause. If you set `AI_ENABLED=true` and point `AI_PROVIDER` at a broken URL, analyze still returns the incident with `ai_status=degraded`.
 
 ## 11. Deployment correlation
 

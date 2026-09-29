@@ -12,7 +12,7 @@ import (
 func TestAzureExecutorAllowlist(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test" {
-			http.Error(w, "auth", 401)
+			http.Error(w, "auth", http.StatusUnauthorized)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -34,5 +34,11 @@ func TestAzureExecutorAllowlist(t *testing.T) {
 	})
 	if err != nil || before["target"] == "" || after["status"] != http.StatusOK {
 		t.Fatalf("%v %v %v", before, after, err)
+	}
+	denied := AzureExecutor{Token: "test", BaseURL: srv.URL, HTTP: srv.Client()}
+	if _, _, err := denied.Execute(context.Background(), domain.RemediationRequest{
+		Action: "restart_web_app", Target: "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/demo/providers/Microsoft.Web/sites/fn",
+	}); err == nil {
+		t.Fatal("empty allowlist must deny")
 	}
 }

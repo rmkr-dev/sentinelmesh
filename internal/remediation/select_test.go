@@ -19,7 +19,8 @@ func TestSelectExecutorMatrix(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "default demo", opts: SelectOptions{DemoApply: apply}, want: "demo"},
+		{name: "explicit demo", opts: SelectOptions{Executor: "demo", DemoApply: apply}, want: "demo"},
+		{name: "empty executor", opts: SelectOptions{DemoApply: apply}, wantErr: true},
 		{name: "demo while remediation off", opts: SelectOptions{Executor: "demo", DemoEnabled: false, RemediationEnabled: false, DemoApply: apply}, want: "demo"},
 		{name: "demo refused when remediation on and demo off", opts: SelectOptions{Executor: "demo", DemoEnabled: false, RemediationEnabled: true, DemoApply: apply}, wantErr: true},
 		{name: "demo allowed for local", opts: SelectOptions{Executor: "demo", DemoEnabled: true, RemediationEnabled: true, DemoApply: apply}, want: "demo"},

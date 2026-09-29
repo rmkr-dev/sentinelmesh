@@ -12,7 +12,7 @@ import (
 )
 
 func TestPolicyDisabledByDefault(t *testing.T) {
-	g := Gate{Policy: DefaultPolicy()}
+	g := Gate{Policy: Policy{Enabled: false, RequireApproval: true, Allowed: map[string]bool{"restart_pod": true, "scale_deployment": true, "rollback_deployment": true}}}
 	_, err := g.NewRequest("rollback_deployment", "payment-service", "error spike", "alice", "INC-1", time.Now())
 	if err == nil {
 		t.Fatal("expected disabled")
@@ -20,7 +20,7 @@ func TestPolicyDisabledByDefault(t *testing.T) {
 }
 
 func TestApprovalSeparation(t *testing.T) {
-	g := Gate{Policy: Policy{Enabled: true, RequireApproval: true, Allowed: DefaultPolicy().Allowed}}
+	g := Gate{Policy: Policy{Enabled: true, RequireApproval: true, Allowed: map[string]bool{"restart_pod": true, "scale_deployment": true, "rollback_deployment": true}}}
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	req, err := g.NewRequest("scale_deployment", "payment-service", "saturation", "alice", "INC-1", now)
 	if err != nil {

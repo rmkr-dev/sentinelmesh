@@ -20,7 +20,7 @@ Providers:
 
 | Name | Behavior |
 | --- | --- |
-| `mock` | Restates the deterministic summary. Default for local. |
+| disabled | `ai.enabled=false` keeps the deterministic summary. This is the local default. |
 | `openai-compatible` | `POST {base}/v1/chat/completions` |
 | `local` | Same client, pointed at a local server |
 | `azure-openai` | Deployment URL and `api-key` header |

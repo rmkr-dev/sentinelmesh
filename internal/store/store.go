@@ -54,6 +54,7 @@ type Store interface {
 
 	SaveAlert(ctx context.Context, a domain.Alert) error
 	ListAlerts(ctx context.Context, since time.Time) ([]domain.Alert, error)
+	ListActiveAlerts(ctx context.Context, since time.Time) ([]domain.Alert, error)
 
 	SaveRemediation(ctx context.Context, r domain.RemediationRequest) error
 	GetRemediation(ctx context.Context, id string) (domain.RemediationRequest, error)

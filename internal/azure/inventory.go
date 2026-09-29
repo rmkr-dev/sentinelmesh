@@ -20,23 +20,43 @@ type InventoryQuery struct {
 // Inventory lists resources and maps them to domain.Resource.
 // Bind a resource to a service with the tag sentinelmesh.service.
 func (c Client) Inventory(ctx context.Context, q InventoryQuery) ([]domain.Resource, error) {
-	payload, _ := json.Marshal(map[string]any{
-		"subscriptions": q.Subscriptions,
-		"query":         q.Query,
-		"options":       map[string]any{"resultFormat": "objectArray"},
-	})
-	req, err := http.NewRequest(http.MethodPost, "https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01", bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
+	var out []domain.Resource
+	skip := ""
+	for {
+		body := map[string]any{
+			"subscriptions": q.Subscriptions,
+			"query":         q.Query,
+			"options":       map[string]any{"resultFormat": "objectArray"},
+		}
+		if skip != "" {
+			body["options"] = map[string]any{"resultFormat": "objectArray", "$skipToken": skip}
+		}
+		payload, _ := json.Marshal(body)
+		req, err := http.NewRequest(http.MethodPost, c.absolute("https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01"), bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		raw, status, err := c.Do(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		if status >= 300 {
+			return nil, fmt.Errorf("resource graph status %d", status)
+		}
+		page, next, err := parseInventory(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page...)
+		if next == "" {
+			return out, nil
+		}
+		skip = next
 	}
-	req.Header.Set("Content-Type", "application/json")
-	body, status, err := c.Do(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	if status >= 300 {
-		return nil, fmt.Errorf("resource graph status %d", status)
-	}
+}
+
+func parseInventory(raw []byte) ([]domain.Resource, string, error) {
 	var parsed struct {
 		Data []struct {
 			ID       string            `json:"id"`
@@ -45,9 +65,10 @@ func (c Client) Inventory(ctx context.Context, q InventoryQuery) ([]domain.Resou
 			Location string            `json:"location"`
 			Tags     map[string]string `json:"tags"`
 		} `json:"data"`
+		SkipToken string `json:"$skipToken"`
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, err
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, "", err
 	}
 	now := time.Now().UTC()
 	var out []domain.Resource
@@ -61,5 +82,5 @@ func (c Client) Inventory(ctx context.Context, q InventoryQuery) ([]domain.Resou
 			Service: svc, Attributes: row.Tags, UpdatedAt: now,
 		})
 	}
-	return out, nil
+	return out, parsed.SkipToken, nil
 }

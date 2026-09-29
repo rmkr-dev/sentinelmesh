@@ -22,11 +22,7 @@ spec:
         fsGroup: 65532
       containers:
         - name: platform
-          {{- if .Values.platform.imageRepository }}
-          image: {{ .Values.platform.imageRepository }}:{{ .Values.platform.imageTag | default "0.1.0" }}
-          {{- else }}
-          image: {{ .Values.platform.image }}
-          {{- end }}
+          image: {{ .Values.platform.image.repository }}:{{ .Values.platform.image.tag | default .Chart.AppVersion }}
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -54,12 +50,22 @@ spec:
               value: {{ .Values.platform.aiEnabled | quote }}
             - name: AI_PROVIDER
               value: {{ .Values.platform.aiProvider | quote }}
+            - name: KUBERNETES_ENABLED
+              value: {{ .Values.platform.kubernetes.enabled | quote }}
+            - name: KUBERNETES_SERVICE_LABEL
+              value: {{ .Values.platform.kubernetes.serviceLabel | quote }}
             - name: PLATFORM_API_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: platform-api
+                  name: {{ if eq .Values.platform.env "production" }}{{ required "production requires platform.auth.secretName" .Values.platform.auth.secretName }}{{ else }}{{ .Values.platform.auth.secretName | default "platform-api" }}{{ end }}
                   key: token
-                  optional: true
+                  optional: {{ ne .Values.platform.env "production" }}
+            - name: PLATFORM_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if eq .Values.platform.env "production" }}{{ required "production requires platform.auth.secretName" .Values.platform.auth.secretName }}{{ else }}{{ .Values.platform.auth.secretName | default "platform-api" }}{{ end }}
+                  key: webhook
+                  optional: {{ ne .Values.platform.env "production" }}
           readinessProbe:
             httpGet:
               path: /ready

@@ -46,10 +46,11 @@ if [[ -z "$baseline" ]]; then
 fi
 echo "baseline healthy"
 
+scenario="${SCENARIO:-deployment-regression}"
 curl -sf -X POST "$base/api/v1/demo/faults" \
   -H 'content-type: application/json' \
-  -d '{"name":"deployment-regression"}' >/dev/null
-echo "deployment-regression enabled"
+  -d "{\"name\":\"${scenario}\"}" >/dev/null
+echo "${scenario} enabled"
 
 incident=""
 for _ in $(seq 1 24); do
@@ -98,7 +99,7 @@ print("grade", label, "ai", analysis.get("ai_status"))
 print(analysis.get("summary", "")[:400])
 PY
 
-curl -sf -X DELETE "$base/api/v1/demo/faults/deployment-regression" >/dev/null
+curl -sf -X DELETE "$base/api/v1/demo/faults/${scenario}" >/dev/null
 echo "fault disabled"
 
 resolved=""

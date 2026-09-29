@@ -9,13 +9,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
 )
+
+type StaticToken struct{ Token string }
+
+func (s StaticToken) GetToken(context.Context, policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	return azcore.AccessToken{Token: s.Token, ExpiresOn: time.Now().Add(time.Hour)}, nil
+}
 
 func TestInventoryAndPromQL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer test-token") {
-			http.Error(w, "no token", 401)
+			http.Error(w, "no token", http.StatusUnauthorized)
 			return
 		}
 		b, _ := io.ReadAll(r.Body)
@@ -32,7 +40,7 @@ func TestInventoryAndPromQL(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	c := Client{Credential: StaticToken{Token: "test-token"}, HTTP: WithBase(srv.URL, srv.Client().Transport)}
+	c := Client{Credential: StaticToken{Token: "test-token"}, HTTP: srv.Client(), BaseURL: srv.URL}
 	resources, err := c.Inventory(context.Background(), InventoryQuery{Subscriptions: []string{"00000000-0000-0000-0000-000000000000"}, Query: "resources"})
 	if err != nil || len(resources) != 1 || resources[0].Service != "inventory-service" {
 		t.Fatalf("%+v %v", resources, err)

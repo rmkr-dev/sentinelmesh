@@ -30,7 +30,7 @@ func (a AzureExecutor) client() *http.Client {
 
 func (a AzureExecutor) Execute(ctx context.Context, req domain.RemediationRequest) (map[string]any, map[string]any, error) {
 	key := req.Action + ":" + req.Target
-	if len(a.Allowlist) > 0 && !a.Allowlist[req.Action] && !a.Allowlist[key] {
+	if len(a.Allowlist) == 0 || (!a.Allowlist[req.Action] && !a.Allowlist[key]) {
 		return nil, nil, fmt.Errorf("azure action %s is not allowlisted", req.Action)
 	}
 	if !strings.HasPrefix(req.Target, "/subscriptions/") {
@@ -40,10 +40,12 @@ func (a AzureExecutor) Execute(ctx context.Context, req domain.RemediationReques
 	var path string
 	var body any
 	switch req.Action {
-	case "restart_container_app", "restart_web_app":
-		path = req.Target + "/restart?api-version=2024-02-02-preview"
+	case "restart_web_app":
+		path = req.Target + "/restart?api-version=2024-04-01"
+	case "restart_container_app":
+		path = req.Target + "/restart?api-version=2024-03-01"
 	case "scale_container_app":
-		path = req.Target + "?api-version=2024-02-02-preview"
+		path = req.Target + "?api-version=2024-03-01"
 		body = map[string]any{"properties": map[string]any{"template": map[string]any{"scale": map[string]any{"minReplicas": req.Replicas}}}}
 	default:
 		return before, nil, fmt.Errorf("unsupported azure action %s", req.Action)

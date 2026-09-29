@@ -7,6 +7,14 @@ variable "subnet_id" {
   default = null
 }
 variable "tags" { type = map(string) }
+variable "enable_container_insights" {
+  type    = bool
+  default = false
+}
+variable "log_analytics_workspace_id" {
+  type    = string
+  default = ""
+}
 
 resource "azurerm_kubernetes_cluster" "this" {
   name                      = var.name
@@ -38,6 +46,18 @@ resource "azurerm_kubernetes_cluster" "this" {
 
   key_vault_secrets_provider {
     secret_rotation_enabled = true
+  }
+
+  dynamic "oms_agent" {
+    for_each = var.enable_container_insights && var.log_analytics_workspace_id != "" ? [1] : []
+    content {
+      log_analytics_workspace_id = var.log_analytics_workspace_id
+    }
+  }
+
+  dynamic "monitor_metrics" {
+    for_each = var.enable_container_insights ? [1] : []
+    content {}
   }
 }
 

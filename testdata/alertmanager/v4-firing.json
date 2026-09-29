@@ -1,0 +1,28 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"HighErrorRate\"}",
+  "truncatedAlerts": 0,
+  "status": "firing",
+  "receiver": "platform",
+  "groupLabels": {"alertname": "HighErrorRate"},
+  "commonLabels": {"alertname": "HighErrorRate", "service": "payment-service", "severity": "critical"},
+  "commonAnnotations": {"summary": "payment errors"},
+  "externalURL": "http://alertmanager:9093",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "service": "payment-service",
+        "severity": "critical",
+        "authorization": "Bearer super-secret-token",
+        "url.query": "https://pay.example/charge?token=sekret&ok=1"
+      },
+      "annotations": {"summary": "payment errors for user@example.com", "description": "ratio"},
+      "startsAt": "2026-09-29T12:00:00.000Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus:9090/graph?g0.expr=up",
+      "fingerprint": "fp-v4-1"
+    }
+  ]
+}

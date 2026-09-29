@@ -202,6 +202,7 @@ type Incident struct {
 	HumanNotes         string              `json:"human_notes,omitempty"`
 	Impact             string              `json:"impact,omitempty"`
 	RelatedServices    []string            `json:"related_services,omitempty"`
+	ResourceID         string              `json:"resource_id,omitempty"`
 	Tenant             string              `json:"tenant,omitempty"`
 	UpdatedAt          time.Time           `json:"updated_at"`
 }
@@ -314,6 +315,12 @@ type Anomaly struct {
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
+// AlertTransition is one status change for an alert fingerprint.
+type AlertTransition struct {
+	Status string    `json:"status"`
+	At     time.Time `json:"at"`
+}
+
 // Alert is an incoming alert from Alertmanager or an equivalent router.
 type Alert struct {
 	ID          string            `json:"id"`
@@ -327,6 +334,7 @@ type Alert struct {
 	EndsAt      *time.Time        `json:"ends_at,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
+	History     []AlertTransition `json:"history,omitempty"`
 }
 
 // Fault is a deterministic demo fault. Production environments leave the catalog disabled.

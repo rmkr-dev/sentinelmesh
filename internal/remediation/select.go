@@ -3,6 +3,7 @@ package remediation
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
@@ -23,6 +24,8 @@ type SelectOptions struct {
 	CAPath             string
 	ServiceHost        string
 	ServicePort        string
+	AzureAllow         map[string]bool
+	HTTP               *http.Client
 }
 
 // Select builds the executor named by configuration.
@@ -31,7 +34,7 @@ type SelectOptions struct {
 func Select(opts SelectOptions) (Executor, error) {
 	kind := opts.Executor
 	if kind == "" {
-		kind = "demo"
+		return nil, fmt.Errorf("remediation executor is not configured")
 	}
 	switch kind {
 	case "demo":
@@ -92,6 +95,8 @@ func Select(opts SelectOptions) (Executor, error) {
 			exec.Tokens = tokens
 		}
 		return exec, nil
+	case "azure":
+		return AzureExecutor{Token: opts.Token, HTTP: opts.HTTP, Allowlist: opts.AzureAllow, BaseURL: opts.APIBase}, nil
 	default:
 		return nil, fmt.Errorf("unknown remediation executor %q", kind)
 	}

@@ -109,7 +109,12 @@ func (p *Postgres) ListMaintenance(ctx context.Context) ([]domain.MaintenanceWin
 
 func (p *Postgres) TryLock(ctx context.Context, key int64) (bool, error) {
 	if p.leader != nil {
-		return true, nil
+		var one int
+		if err := p.leader.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil {
+			p.releaseLeader()
+		} else {
+			return true, nil
+		}
 	}
 	conn, err := p.pool.Acquire(ctx)
 	if err != nil {
@@ -126,6 +131,30 @@ func (p *Postgres) TryLock(ctx context.Context, key int64) (bool, error) {
 	}
 	p.leader = conn
 	return true, nil
+}
+
+// ReleaseLock drops the advisory lock and returns the connection to the pool.
+func (p *Postgres) ReleaseLock() {
+	p.releaseLeader()
+}
+
+func (p *Postgres) releaseLeader() {
+	if p.leader == nil {
+		return
+	}
+	_, _ = p.leader.Exec(context.Background(), `SELECT pg_advisory_unlock_all()`)
+	p.leader.Release()
+	p.leader = nil
+}
+
+// LeaderBackendPID is the PostgreSQL backend holding the advisory lock.
+func (p *Postgres) LeaderBackendPID(ctx context.Context) (int, error) {
+	if p.leader == nil {
+		return 0, ErrNotFound
+	}
+	var pid int
+	err := p.leader.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid)
+	return pid, err
 }
 
 func tenantOrDefault(v string) string {

@@ -2,9 +2,9 @@ nameOverride: platform
 namespace: observability
 
 platform:
-  image: sentinelmesh:local
-  imageRepository: ""
-  imageTag: "0.1.0"
+  image:
+    repository: ghcr.io/rmkr-dev/sentinelmesh
+    tag: ""
   replicas: 1
   demo: false
   env: production
@@ -13,9 +13,14 @@ platform:
   prometheusUrl: http://prometheus:9090
   jaegerUrl: http://jaeger:16686
   lokiUrl: http://loki:3100
-  aiProvider: mock
-  aiEnabled: true
-  apiToken: ""
+  aiProvider: ""
+  aiEnabled: false
+  auth:
+    secretName: platform-api
+  kubernetes:
+    enabled: false
+    serviceLabel: app.kubernetes.io/name
+  remediationNamespace: observability
   resources:
     requests:
       cpu: 50m
@@ -44,7 +49,6 @@ collector:
 
 demo:
   enabled: false
-  image: sentinelmesh:local
 
 serviceAccount:
   name: platform

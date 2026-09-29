@@ -44,7 +44,7 @@ func TestIncidentFlowAndAIDegradation(t *testing.T) {
 	}
 	srv := &Server{
 		Store: st, Engine: eng, Demo: true,
-		Gate: remediation.Gate{Policy: remediation.DefaultPolicy()},
+		Gate: remediation.Gate{Policy: remediation.Policy{Enabled: false, RequireApproval: true}},
 	}
 	h := srv.Handler()
 

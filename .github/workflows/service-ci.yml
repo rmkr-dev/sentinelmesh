@@ -2,11 +2,6 @@ name: service-ci
 
 on:
   workflow_call:
-    inputs:
-      go-version:
-        description: Go version
-        type: string
-        default: "1.25"
 
 permissions:
   contents: read
@@ -15,10 +10,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: ${{ inputs.go-version }}
+          go-version-file: go.mod
       - name: Format
         run: test -z "$(gofmt -l .)"
       - name: Vet

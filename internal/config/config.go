@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +26,8 @@ type Config struct {
 	Remediation RemediationConfig `yaml:"remediation"`
 	Demo        DemoConfig        `yaml:"demo"`
 	Auth        AuthConfig        `yaml:"auth"`
+	Kubernetes  KubernetesConfig  `yaml:"kubernetes"`
+	Azure       AzureConfig       `yaml:"azure"`
 	UI          UIConfig          `yaml:"ui"`
 	Paths       PathsConfig       `yaml:"paths"`
 }
@@ -36,6 +37,7 @@ type HTTPConfig struct {
 }
 
 type TelemetryConfig struct {
+	Backend        string   `yaml:"backend"`
 	PrometheusURL  string   `yaml:"prometheus_url"`
 	JaegerURL      string   `yaml:"jaeger_url"`
 	LokiURL        string   `yaml:"loki_url"`
@@ -48,10 +50,19 @@ type TelemetryConfig struct {
 }
 
 type EngineConfig struct {
-	Interval           time.Duration `yaml:"interval"`
-	CorrelationWindow  time.Duration `yaml:"correlation_window"`
-	DeploymentLookback time.Duration `yaml:"deployment_lookback"`
-	AnomalyRetention   time.Duration `yaml:"anomaly_retention"`
+	Interval           time.Duration    `yaml:"interval"`
+	CorrelationWindow  time.Duration    `yaml:"correlation_window"`
+	DeploymentLookback time.Duration    `yaml:"deployment_lookback"`
+	AnomalyRetention   time.Duration    `yaml:"anomaly_retention"`
+	Detectors          []DetectorConfig `yaml:"detectors"`
+}
+
+type DetectorConfig struct {
+	Name      string  `yaml:"name"`
+	Metric    string  `yaml:"metric"`
+	Threshold float64 `yaml:"threshold"`
+	Window    int     `yaml:"window"`
+	MinPoints int     `yaml:"min_points"`
 }
 
 type AIConfig struct {
@@ -77,9 +88,39 @@ type DemoConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+type KubernetesConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	ServiceLabel string `yaml:"service_label"`
+}
+
+type AzureConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	Subscription    string `yaml:"subscription"`
+	WorkspaceID     string `yaml:"workspace_id"`
+	MonitorEndpoint string `yaml:"monitor_endpoint"`
+	AuthMode        string `yaml:"auth_mode"`
+	ResourceTypes   string `yaml:"resource_types"`
+}
+
+type AuthPrincipal struct {
+	Name     string `yaml:"name"`
+	TokenEnv string `yaml:"token_env"`
+	Role     string `yaml:"role"`
+	Token    string `yaml:"-"`
+}
+
+type OIDCConfig struct {
+	Issuer     string `yaml:"issuer"`
+	Audience   string `yaml:"audience"`
+	RolesClaim string `yaml:"roles_claim"`
+}
+
 type AuthConfig struct {
-	Token        string `yaml:"token"`
-	WebhookToken string `yaml:"webhook_token"`
+	Mode         string          `yaml:"mode"`
+	Token        string          `yaml:"token"`
+	WebhookToken string          `yaml:"webhook_token"`
+	Principals   []AuthPrincipal `yaml:"principals"`
+	OIDC         OIDCConfig      `yaml:"oidc"`
 }
 
 // Policy builds the redaction policy the platform applies before persistence and AI calls.
@@ -178,7 +219,61 @@ func Load(dir, environment string) (Config, error) {
 	if cfg.Engine.AnomalyRetention == 0 {
 		cfg.Engine.AnomalyRetention = 7 * 24 * time.Hour
 	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+// Validate rejects demo and unauthenticated settings in production and staging.
+func (c Config) Validate() error {
+	if c.Environment != "production" && c.Environment != "staging" {
+		return nil
+	}
+	var problems []string
+	if c.Store == "" || c.Store == "memory" {
+		problems = append(problems, "store must be postgres")
+	}
+	if c.Demo.Enabled {
+		problems = append(problems, "demo.enabled must be false")
+	}
+	if c.Remediation.Executor == "demo" {
+		problems = append(problems, "remediation.executor demo is refused")
+	}
+	if c.AI.Enabled && !realAIProvider(c.AI.Provider) {
+		problems = append(problems, "ai.enabled requires provider openai-compatible or azure-openai")
+	}
+	if !c.hasPrincipal() && c.Auth.OIDC.Issuer == "" {
+		problems = append(problems, "auth requires a principal or oidc issuer")
+	}
+	if c.Auth.WebhookToken == "" && c.Auth.OIDC.Audience == "" {
+		problems = append(problems, "webhook auth is empty")
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return fmt.Errorf("invalid %s config: %s", c.Environment, strings.Join(problems, "; "))
+}
+
+func realAIProvider(name string) bool {
+	switch name {
+	case "openai-compatible", "azure-openai", "local":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c Config) hasPrincipal() bool {
+	if c.Auth.Token != "" {
+		return true
+	}
+	for _, p := range c.Auth.Principals {
+		if p.Token != "" || p.TokenEnv != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func defaults(env string) Config {
@@ -198,11 +293,10 @@ func defaults(env string) Config {
 			DeploymentLookback: 30 * time.Minute,
 			AnomalyRetention:   7 * 24 * time.Hour,
 		},
-		AI: AIConfig{Enabled: true, Provider: "mock", Temperature: 0, MaxTokens: 1200},
+		AI: AIConfig{Enabled: false, Temperature: 0, MaxTokens: 1200},
 		Remediation: RemediationConfig{
 			Enabled:         false,
 			RequireApproval: true,
-			Executor:        "demo",
 			AllowedActions:  []string{"restart_pod", "scale_deployment", "rollback_deployment"},
 		},
 		Demo: DemoConfig{Enabled: env == "local"},
@@ -243,6 +337,33 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PLATFORM_WEBHOOK_TOKEN"); v != "" {
 		cfg.Auth.WebhookToken = v
+	}
+	if v := os.Getenv("AUTH_MODE"); v != "" {
+		cfg.Auth.Mode = v
+	}
+	for i := range cfg.Auth.Principals {
+		if cfg.Auth.Principals[i].TokenEnv == "" {
+			continue
+		}
+		cfg.Auth.Principals[i].Token = os.Getenv(cfg.Auth.Principals[i].TokenEnv)
+	}
+	if v := os.Getenv("KUBERNETES_ENABLED"); v != "" {
+		cfg.Kubernetes.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("KUBERNETES_SERVICE_LABEL"); v != "" {
+		cfg.Kubernetes.ServiceLabel = v
+	}
+	if v := os.Getenv("AZURE_SUBSCRIPTION_ID"); v != "" {
+		cfg.Azure.Subscription = v
+	}
+	if v := os.Getenv("AZURE_WORKSPACE_ID"); v != "" {
+		cfg.Azure.WorkspaceID = v
+	}
+	if v := os.Getenv("AZURE_MONITOR_ENDPOINT"); v != "" {
+		cfg.Azure.MonitorEndpoint = v
+	}
+	if v := os.Getenv("AZURE_AUTH"); v != "" {
+		cfg.Azure.AuthMode = v
 	}
 	if v := os.Getenv("AI_PROVIDER"); v != "" {
 		cfg.AI.Provider = v
@@ -434,15 +555,27 @@ func deepMerge(base, overlay map[string]any) map[string]any {
 	return out
 }
 
-// EnvBool parses a boolean environment variable.
-func EnvBool(key string, def bool) bool {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
+// ResolveDir picks an existing directory. The environment variable wins, then the
+// configured path, then the fallback. A missing directory is an error.
+func ResolveDir(envKey, configured, fallback string) (string, error) {
+	path := ""
+	switch {
+	case os.Getenv(envKey) != "":
+		path = os.Getenv(envKey)
+	case configured != "":
+		path = configured
+	default:
+		path = fallback
 	}
-	b, err := strconv.ParseBool(v)
+	if path == "" {
+		return "", fmt.Errorf("%s path is empty", envKey)
+	}
+	info, err := os.Stat(path)
 	if err != nil {
-		return def
+		return "", fmt.Errorf("%s: %w", path, err)
 	}
-	return b
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", path)
+	}
+	return path, nil
 }
