@@ -22,7 +22,11 @@ spec:
         fsGroup: 65532
       containers:
         - name: platform
+          {{- if .Values.platform.imageRepository }}
+          image: {{ .Values.platform.imageRepository }}:{{ .Values.platform.imageTag | default "0.1.0" }}
+          {{- else }}
           image: {{ .Values.platform.image }}
+          {{- end }}
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

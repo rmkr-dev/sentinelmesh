@@ -5,7 +5,6 @@ package rca
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -191,15 +190,36 @@ func Analyze(pack Pack) domain.Analysis {
 		}
 	}
 
+	var k8sEvidence []string
 	for _, ev := range pack.K8s {
-		add(domain.Evidence{
+		grade := domain.GradePossible
+		statement := ""
+		switch {
+		case strings.Contains(ev.Reason, "OOM") || strings.Contains(ev.Message, "OOMKilled"):
+			grade = domain.GradeProbable
+			statement = "Container OOMKilled after memory growth."
+		case strings.Contains(ev.Reason, "NodeNotReady") || strings.Contains(ev.Message, "NodeNotReady"):
+			grade = domain.GradeProbable
+			statement = "A node hosting affected pods is NotReady."
+		case strings.Contains(ev.Reason, "ImagePull") || strings.Contains(ev.Message, "ImagePull"):
+			grade = domain.GradeStronglyCorrelated
+			statement = "Image pull failed after a rollout. This is a strong correlation with the rollout, not a confirmed application defect."
+		}
+		id := add(domain.Evidence{
 			Kind:      "kubernetes",
 			Source:    "kubernetes",
-			Grade:     domain.GradePossible,
+			Grade:     grade,
 			Timestamp: ev.At,
 			Summary:   fmt.Sprintf("%s %s/%s: %s", ev.Type, ev.Namespace, ev.Object, ev.Message),
 		})
+		if statement != "" {
+			k8sEvidence = append(k8sEvidence, id)
+			a.Hypotheses = append(a.Hypotheses, domain.Hypothesis{
+				ID: "h-k8s-" + ev.Reason, Grade: grade, EvidenceIDs: []string{id}, Statement: statement,
+			})
+		}
 	}
+	_ = k8sEvidence
 
 	for _, sig := range pack.Incident.Signals {
 		add(domain.Evidence{
@@ -303,9 +323,7 @@ func Analyze(pack Pack) domain.Analysis {
 			Detail: "Review the cited evidence and fill the missing-evidence list before changing production.",
 		})
 	}
-	sort.SliceStable(a.Hypotheses, func(i, j int) bool {
-		return gradeScore(a.Hypotheses[i].Grade) > gradeScore(a.Hypotheses[j].Grade)
-	})
+	a.Hypotheses = Rank(a.Hypotheses, a.Evidence)
 	return a
 }
 

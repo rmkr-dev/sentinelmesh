@@ -1,0 +1,7 @@
+type: Microsoft.Web/sites
+signals:
+  - metric: Http5xx
+  - metric: Requests
+  - metric: HttpResponseTime
+  - metric: FunctionExecutionCount
+  - metric: HealthCheckStatus

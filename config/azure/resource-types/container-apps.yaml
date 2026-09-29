@@ -1,0 +1,7 @@
+type: Microsoft.App/containerApps
+signals:
+  - metric: Requests
+    dimensions: [statusCodeCategory]
+  - metric: RestartCount
+  - metric: Replicas
+  - metric: ResponseTime

@@ -17,7 +17,8 @@ var migrationFS embed.FS
 
 // Postgres stores platform state in PostgreSQL.
 type Postgres struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	leader *pgxpool.Conn
 }
 
 // NewPostgres opens a pool and applies migrations.
@@ -35,15 +36,57 @@ func NewPostgres(ctx context.Context, databaseURL string) (*Postgres, error) {
 }
 
 // Close releases the pool.
-func (p *Postgres) Close() { p.pool.Close() }
+func (p *Postgres) Close() {
+	if p.leader != nil {
+		p.leader.Release()
+		p.leader = nil
+	}
+	p.pool.Close()
+}
 
 func (p *Postgres) migrate(ctx context.Context) error {
-	b, err := migrationFS.ReadFile("migrations/001_init.sql")
+	if _, err := p.pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version TEXT PRIMARY KEY,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return err
+	}
+	entries, err := migrationFS.ReadDir("migrations")
 	if err != nil {
 		return err
 	}
-	_, err = p.pool.Exec(ctx, string(b))
-	return err
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		var exists bool
+		if err := p.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)`, e.Name()).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		b, err := migrationFS.ReadFile("migrations/" + e.Name())
+		if err != nil {
+			return err
+		}
+		tx, err := p.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, string(b)); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("%s: %w", e.Name(), err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (version) VALUES ($1)`, e.Name()); err != nil {
+			_ = tx.Rollback(ctx)
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *Postgres) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
