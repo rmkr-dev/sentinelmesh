@@ -2,11 +2,12 @@ store: postgres
 demo:
   enabled: true
 ai:
-  enabled: true
-  provider: mock
+  enabled: false
+  provider: ""
 remediation:
   enabled: false
   require_approval: true
+  executor: demo
 engine:
   interval: 30s
   correlation_window: 5m

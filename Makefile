@@ -38,8 +38,8 @@ test-e2e-kind: ## Kind cluster scenario. Requires kind and helm.
 test-e2e: ## End-to-end demo against a running local stack
 	./scripts/e2e.sh
 
-security: ## govulncheck when installed
-	@command -v govulncheck >/dev/null && govulncheck ./... || echo "govulncheck not installed; CI runs it"
+security: ## Reachable vulnerability scan
+	go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
 build: ## Build local binaries
 	mkdir -p bin
@@ -63,8 +63,8 @@ status: ## Compose status
 logs: ## Follow compose logs
 	docker compose logs -f --tail=100
 
-demo: ## Run the scripted fault, analysis, and recovery flow
-	./scripts/e2e.sh
+demo: ## Run a scenario (SCENARIO=deployment-regression)
+	SCENARIO=$${SCENARIO:-deployment-regression} ./scripts/e2e.sh
 
 fault-enable: ## Enable a demo fault (FAULT=payment-latency)
 	OBSCTL_API=$${OBSCTL_API:-http://localhost:8080} go run ./cmd/obsctl demo fault enable $(FAULT)
@@ -82,14 +82,17 @@ azure-bootstrap: ## Print the Azure bootstrap steps
 	@echo "See docs/deployment/azure.md and docs/deployment/github-oidc.md"
 	@echo "Then: make azure-plan PROFILE=$(PROFILE)"
 
-azure-plan: ## Terraform plan for PROFILE
-	cd infra/terraform && terraform init -backend=false && terraform plan -var-file=profiles/$(PROFILE).tfvars
+azure-plan: ## Terraform plan for PROFILE. Set TF_VAR_subscription_id or ARM_SUBSCRIPTION_ID.
+	@test -n "$${TF_VAR_subscription_id:-$$ARM_SUBSCRIPTION_ID}" || { echo "set TF_VAR_subscription_id or ARM_SUBSCRIPTION_ID"; exit 1; }
+	cd infra/terraform && terraform init -backend=false && terraform plan -var-file=profiles/$(PROFILE).tfvars -var=subscription_id=$${TF_VAR_subscription_id:-$$ARM_SUBSCRIPTION_ID}
 
 azure-apply: ## Terraform apply for PROFILE
-	cd infra/terraform && terraform init -backend=false && terraform apply -var-file=profiles/$(PROFILE).tfvars
+	@test -n "$${TF_VAR_subscription_id:-$$ARM_SUBSCRIPTION_ID}" || { echo "set TF_VAR_subscription_id or ARM_SUBSCRIPTION_ID"; exit 1; }
+	cd infra/terraform && terraform init -backend=false && terraform apply -var-file=profiles/$(PROFILE).tfvars -var=subscription_id=$${TF_VAR_subscription_id:-$$ARM_SUBSCRIPTION_ID}
 
 azure-destroy: ## Terraform destroy for PROFILE
-	cd infra/terraform && terraform destroy -var-file=profiles/$(PROFILE).tfvars
+	@test -n "$${TF_VAR_subscription_id:-$$ARM_SUBSCRIPTION_ID}" || { echo "set TF_VAR_subscription_id or ARM_SUBSCRIPTION_ID"; exit 1; }
+	cd infra/terraform && terraform init -backend=false && terraform destroy -var-file=profiles/$(PROFILE).tfvars -var=subscription_id=$${TF_VAR_subscription_id:-$$ARM_SUBSCRIPTION_ID}
 
 helm-lint: ## Lint the Helm chart
 	helm lint helm/platform

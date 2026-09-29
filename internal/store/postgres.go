@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -292,12 +293,33 @@ func (p *Postgres) DeleteFault(ctx context.Context, name string) error {
 }
 
 func (p *Postgres) SaveAlert(ctx context.Context, a domain.Alert) error {
+	var prev domain.Alert
+	err := p.one(ctx, &prev, `SELECT document FROM alerts WHERE id = $1 OR fingerprint = $2 ORDER BY starts_at ASC LIMIT 1`, a.ID, a.Fingerprint)
+	if err == nil {
+		a = mergeAlert(&prev, a)
+	} else if errors.Is(err, ErrNotFound) {
+		a = mergeAlert(nil, a)
+	} else {
+		return err
+	}
 	return p.upsert(ctx, `INSERT INTO alerts (id, fingerprint, starts_at, document) VALUES ($1, $2, $3, $4)
-		ON CONFLICT (id) DO UPDATE SET document = EXCLUDED.document`, a.ID, a.Fingerprint, a.StartsAt, a)
+		ON CONFLICT (id) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, document = EXCLUDED.document`, a.ID, a.Fingerprint, a.StartsAt, a)
 }
 
 func (p *Postgres) ListAlerts(ctx context.Context, since time.Time) ([]domain.Alert, error) {
 	rows, err := p.pool.Query(ctx, `SELECT document FROM alerts WHERE starts_at >= $1 ORDER BY starts_at DESC`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collect[domain.Alert](rows)
+}
+
+func (p *Postgres) ListActiveAlerts(ctx context.Context, since time.Time) ([]domain.Alert, error) {
+	rows, err := p.pool.Query(ctx, `SELECT document FROM alerts
+		WHERE document->>'status' = 'firing'
+		   OR (document->>'status' = 'resolved' AND COALESCE(NULLIF(document->>'ends_at','')::timestamptz, starts_at) >= $1)
+		ORDER BY starts_at DESC`, since)
 	if err != nil {
 		return nil, err
 	}

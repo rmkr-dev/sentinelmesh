@@ -1,0 +1,2 @@
+# HTML input hint. Not unfinished work.
+web/index.html:placeholder=

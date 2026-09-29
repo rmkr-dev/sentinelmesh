@@ -21,16 +21,14 @@ func (c Client) PromQL(ctx context.Context, endpoint, query string) (float64, bo
 	q := u.Query()
 	q.Set("query", query)
 	u.RawQuery = q.Encode()
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	req, err := http.NewRequest(http.MethodGet, c.absolute(u.String()), nil)
 	if err != nil {
 		return 0, false, err
 	}
-	saved := c.Scope
 	if c.Scope == "" {
 		c.Scope = "https://prometheus.monitor.azure.com/.default"
 	}
 	body, status, err := c.Do(ctx, req)
-	c.Scope = saved
 	if err != nil {
 		return 0, false, err
 	}
@@ -65,16 +63,16 @@ func (c Client) KQL(ctx context.Context, workspaceID, kql string, timespan strin
 		timespan = "PT1H"
 	}
 	payload, _ := json.Marshal(map[string]string{"query": kql, "timespan": timespan})
-	endpoint := fmt.Sprintf("https://api.loganalytics.io/v1/workspaces/%s/query", workspaceID)
+	endpoint := c.absolute(fmt.Sprintf("https://api.loganalytics.io/v1/workspaces/%s/query", workspaceID))
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	saved := c.Scope
-	c.Scope = "https://api.loganalytics.io/.default"
+	if c.Scope == "" {
+		c.Scope = "https://api.loganalytics.io/.default"
+	}
 	body, status, err := c.Do(ctx, req)
-	c.Scope = saved
 	if err != nil {
 		return nil, err
 	}
@@ -126,10 +124,13 @@ func ChangesFromActivity(rows []map[string]any, now time.Time) []domain.Change {
 		actor, _ := row["Caller"].(string)
 		id, _ := row["CorrelationId"].(string)
 		if id == "" {
+			id, _ = row["EventDataId"].(string)
+		}
+		if id == "" {
 			id = op + "|" + target
 		}
 		out = append(out, domain.Change{
-			ID: id, Kind: "activity", Source: "activity_log", Target: target, Actor: actor, OccurredAt: now,
+			ID: id, Kind: "activity", Source: "activity_log", Target: target, Actor: actor, OccurredAt: rowTime(row, now),
 			Attributes: map[string]string{"operation": op},
 		})
 	}
@@ -146,7 +147,21 @@ func HealthFromRows(rows []map[string]any, now time.Time) []domain.HealthEvent {
 			state, _ = row["properties_currentHealthStatus"].(string)
 		}
 		reason, _ := row["Reason"].(string)
-		out = append(out, domain.HealthEvent{Resource: res, State: state, Reason: reason, Source: "resource_health", At: now})
+		out = append(out, domain.HealthEvent{Resource: res, State: state, Reason: reason, Source: "resource_health", At: rowTime(row, now)})
 	}
 	return out
+}
+
+func rowTime(row map[string]any, fallback time.Time) time.Time {
+	for _, key := range []string{"TimeGenerated", "EventTimestamp", "time", "timestamp"} {
+		switch v := row[key].(type) {
+		case string:
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				return t.UTC()
+			}
+		case time.Time:
+			return v.UTC()
+		}
+	}
+	return fallback
 }

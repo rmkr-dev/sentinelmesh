@@ -22,15 +22,15 @@ engine:
   deployment_lookback: 30m
   anomaly_retention: 168h
 ai:
-  enabled: true
-  provider: mock
+  enabled: false
+  provider: ""
   model: ""
   temperature: 0
   max_tokens: 1200
 remediation:
   enabled: false
   require_approval: true
-  executor: demo
+  executor: ""
   allowed_actions:
     - restart_pod
     - scale_deployment

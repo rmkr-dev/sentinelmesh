@@ -1,4 +1,42 @@
 {{- if .Values.collector.agent.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-agent
+  namespace: {{ .Values.namespace }}
+data:
+  config.yaml: |
+    receivers:
+      kubeletstats:
+        collection_interval: 30s
+        auth_type: serviceAccount
+        endpoint: ${env:K8S_NODE_IP}:10250
+      filelog:
+        include: [/var/log/pods/*/*/*.log]
+        start_at: end
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata: [k8s.namespace.name, k8s.pod.name, k8s.deployment.name]
+    processors:
+      batch: {}
+    exporters:
+      otlp:
+        endpoint: ${env:OTEL_GATEWAY_ENDPOINT}
+        tls:
+          insecure: true
+    service:
+      pipelines:
+        metrics:
+          receivers: [kubeletstats]
+          processors: [k8sattributes, batch]
+          exporters: [otlp]
+        logs:
+          receivers: [filelog]
+          processors: [k8sattributes, batch]
+          exporters: [otlp]
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -12,13 +50,26 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: otel-collector-agent
-        azure.workload.identity/use: "true"
     spec:
       serviceAccountName: collector-agent
       containers:
         - name: agent
           image: {{ .Values.collector.image }}
           args: ["--config=/etc/otel/config.yaml"]
+          env:
+            - name: K8S_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OTEL_GATEWAY_ENDPOINT
+              value: {{ .Values.collector.agent.gatewayEndpoint | default "otel-collector:4317" | quote }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -28,16 +79,46 @@ spec:
             - name: config
               mountPath: /etc/otel
               readOnly: true
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
       volumes:
         - name: config
           configMap:
-            name: otel-collector
+            name: otel-collector-agent
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+            type: Directory
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: collector-agent
   namespace: {{ .Values.namespace }}
-  annotations:
-    azure.workload.identity/client-id: {{ .Values.collector.azure.clientId | default "" | quote }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-collector-agent
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/stats", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector-agent
+subjects:
+  - kind: ServiceAccount
+    name: collector-agent
+    namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-collector-agent
 {{- end }}

@@ -199,17 +199,6 @@ func symptomReason(reason string) bool {
 	}
 }
 
-func serviceFromObject(object, label string) string {
-	name := object
-	if i := strings.LastIndex(object, "/"); i >= 0 {
-		name = object[i+1:]
-	}
-	if label == "" {
-		return name
-	}
-	return name
-}
-
 func contains(ss []string, v string) bool {
 	for _, s := range ss {
 		if s == v {

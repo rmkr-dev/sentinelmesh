@@ -15,6 +15,30 @@ groups:
         annotations:
           summary: "{{ $labels.service_name }} error rate is above 5%"
           description: "HTTP 5xx ratio for {{ $labels.service_name }} exceeded 0.05 for 30s."
+      - alert: AvailabilityMultiBurn
+        expr: |
+          (
+            (
+              sum by (service_name) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m]))
+              /
+              clamp_min(sum by (service_name) (rate(http_server_request_duration_seconds_count[5m])), 1e-9)
+            ) / 0.001 > 14.4
+          )
+          and
+          (
+            (
+              sum by (service_name) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[1h]))
+              /
+              clamp_min(sum by (service_name) (rate(http_server_request_duration_seconds_count[1h])), 1e-9)
+            ) / 0.001 > 6
+          )
+        for: 2m
+        labels:
+          severity: critical
+          service: "{{ $labels.service_name }}"
+        annotations:
+          summary: "{{ $labels.service_name }} availability burn rate is paging"
+          description: "Both the 5m and 1h burn rates exceed the multi-window thresholds."
       - alert: PaymentHighLatency
         expr: |
           histogram_quantile(

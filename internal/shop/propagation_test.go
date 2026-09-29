@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/rmkr-dev/sentinelmesh/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -14,7 +15,7 @@ import (
 )
 
 func TestOutboundRequestCarriesTraceparent(t *testing.T) {
-	InstallPropagator()
+	telemetry.InstallPropagator()
 	tp := sdktrace.NewTracerProvider()
 	otel.SetTracerProvider(tp)
 	t.Cleanup(func() {

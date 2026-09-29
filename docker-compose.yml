@@ -10,6 +10,8 @@ x-demo: &demo
     OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
     PLATFORM_URL: http://platform:8080
+    PROFILING_ENABLED: "true"
+    PYROSCOPE_URL: http://pyroscope:4040
   depends_on:
     otel-collector:
       condition: service_started
@@ -91,6 +93,7 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_AUTH_DISABLE_LOGIN_FORM: "false"
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-observability}
+      GF_INSTALL_PLUGINS: grafana-pyroscope-datasource
     volumes:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./dashboards/grafana:/var/lib/grafana/dashboards:ro
@@ -116,11 +119,12 @@ services:
       GRAFANA_URL: http://localhost:3000
       JAEGER_UI_URL: http://localhost:16686
       DEMO_ENABLED: "true"
-      AI_ENABLED: "true"
+      AI_ENABLED: "false"
+      PROFILING_ENABLED: "true"
+      PYROSCOPE_URL: http://pyroscope:4040
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
       OTEL_SERVICE_NAME: sentinelmesh
-      AI_PROVIDER: mock
       PLATFORM_WEBHOOK_TOKEN: local-demo-webhook
     ports:
       - "8080:8080"

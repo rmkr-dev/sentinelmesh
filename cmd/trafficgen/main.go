@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -61,7 +60,6 @@ func checkout(ctx context.Context, client *http.Client, target, sku string) {
 	if resp.StatusCode >= 500 {
 		slog.Info("checkout error", "status", resp.StatusCode, "sku", sku)
 	}
-	_ = fmt.Sprintf("%s", sku)
 }
 
 func env(k, def string) string {

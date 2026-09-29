@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -16,6 +17,25 @@ type Client struct {
 	Credential azcore.TokenCredential
 	HTTP       *http.Client
 	Scope      string
+	// BaseURL rewrites the request host. Production leaves it empty.
+	BaseURL string
+}
+
+func (c Client) absolute(raw string) string {
+	if c.BaseURL == "" {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	base, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return raw
+	}
+	u.Scheme = base.Scheme
+	u.Host = base.Host
+	return u.String()
 }
 
 func (c Client) http() *http.Client {
@@ -55,10 +75,3 @@ func (c Client) Do(ctx context.Context, req *http.Request) ([]byte, int, error) 
 type errString string
 
 func (e errString) Error() string { return string(e) }
-
-// StaticToken is a test credential.
-type StaticToken struct{ Token string }
-
-func (s StaticToken) GetToken(context.Context, policy.TokenRequestOptions) (azcore.AccessToken, error) {
-	return azcore.AccessToken{Token: s.Token, ExpiresOn: time.Now().Add(time.Hour)}, nil
-}

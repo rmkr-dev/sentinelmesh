@@ -30,15 +30,19 @@ func NormalizeFingerprint(a domain.Alert) string {
 }
 
 // Flapping is true when the same fingerprint changed state at least n times in the window.
+// Transitions recorded on the alert history count, because one fingerprint is one row.
 func Flapping(history []domain.Alert, fingerprint string, n int, window time.Duration, now time.Time) bool {
 	if n <= 0 {
 		n = 3
 	}
-	var changes int
-	var prev string
+	var transitions []domain.AlertTransition
 	var rows []domain.Alert
 	for _, a := range history {
-		if NormalizeFingerprint(a) != fingerprint {
+		if NormalizeFingerprint(a) != fingerprint && a.Fingerprint != fingerprint {
+			continue
+		}
+		if len(a.History) > 0 {
+			transitions = append(transitions, a.History...)
 			continue
 		}
 		if now.Sub(a.StartsAt) > window && (a.EndsAt == nil || now.Sub(*a.EndsAt) > window) {
@@ -46,12 +50,27 @@ func Flapping(history []domain.Alert, fingerprint string, n int, window time.Dur
 		}
 		rows = append(rows, a)
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].StartsAt.Before(rows[j].StartsAt) })
-	for _, a := range rows {
-		if prev != "" && prev != a.Status {
+	if len(transitions) == 0 {
+		sort.Slice(rows, func(i, j int) bool { return rows[i].StartsAt.Before(rows[j].StartsAt) })
+		for _, a := range rows {
+			at := a.StartsAt
+			if a.Status == "resolved" && a.EndsAt != nil {
+				at = *a.EndsAt
+			}
+			transitions = append(transitions, domain.AlertTransition{Status: a.Status, At: at})
+		}
+	}
+	sort.Slice(transitions, func(i, j int) bool { return transitions[i].At.Before(transitions[j].At) })
+	var changes int
+	var prev string
+	for _, t := range transitions {
+		if !t.At.IsZero() && now.Sub(t.At) > window {
+			continue
+		}
+		if prev != "" && prev != t.Status {
 			changes++
 		}
-		prev = a.Status
+		prev = t.Status
 	}
 	return changes >= n
 }

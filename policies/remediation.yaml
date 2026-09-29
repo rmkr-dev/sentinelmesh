@@ -1,8 +1,0 @@
-# Default remediation policy. The process reads the same values from config/base.yaml.
-remediation:
-  enabled: false
-  require_approval: true
-  allowed_actions:
-    - restart_pod
-    - scale_deployment
-    - rollback_deployment

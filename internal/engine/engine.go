@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,12 +55,22 @@ type Engine struct {
 	Graph       correlation.Relater
 	MaxHops     int
 	Cluster     ClusterSource
+	Detectors   []DetectorSpec
+	OnSLO       func([]domain.SLOResult)
 
 	mu          sync.Mutex
 	lastK8s     []domain.K8sEvent
 	metricState string
 	traceState  string
 	logState    string
+	LastResults []domain.SLOResult
+}
+
+// DetectorSpec names a statistical detector and the SLO metric it reads.
+type DetectorSpec struct {
+	Name   string
+	Metric string
+	Params anomaly.Params
 }
 
 // ComponentHealth reports backend reachability. The AI layer is intentionally absent.
@@ -183,6 +194,10 @@ func (e *Engine) tick(ctx context.Context) error {
 	if err := e.sweep(ctx, now); err != nil {
 		e.log().Warn("retention sweep failed", "error", err.Error())
 	}
+	e.LastResults = results
+	if e.OnSLO != nil {
+		e.OnSLO(results)
+	}
 	return nil
 }
 
@@ -265,6 +280,9 @@ func (e *Engine) evaluateSLOs(ctx context.Context, defs []domain.SLODefinition, 
 				})
 			}
 		}
+		if page := multiBurnSignal(def, results, now); page != nil {
+			signals = append(signals, *page)
+		}
 	}
 	if failed {
 		e.metricState = "degraded"
@@ -318,22 +336,26 @@ func (e *Engine) detectAnomalies(ctx context.Context, services []domain.Service,
 	}
 	var signals []domain.Signal
 	for _, svc := range services {
-		q := e.Conventions.ErrorRatioQuery(svc.Name, "1m")
-		points, err := e.Deps.Metrics.Range(ctx, q, now.Add(-30*time.Minute), now, time.Minute)
-		if err != nil {
-			e.metricState = "degraded"
-			continue
-		}
-		if len(points) == 0 {
-			continue
-		}
-		series := anomaly.Series{Service: svc.Name, Metric: "error_ratio", Points: points}
-		for _, det := range []anomaly.Detector{anomaly.ZScoreDetector{}, anomaly.RateChangeDetector{}, anomaly.ThresholdDetector{}} {
-			params := anomaly.Params{}
-			if det.Name() == "threshold" {
-				params.Threshold = 0.05
+		for _, spec := range e.detectorSpecs() {
+			det, ok := anomaly.ByName(spec.Name)
+			if !ok {
+				continue
 			}
-			found, err := det.Detect(series, params)
+			q := e.metricQuery(spec.Metric, svc.Name)
+			points, err := e.Deps.Metrics.Range(ctx, q, now.Add(-30*time.Minute), now, time.Minute)
+			if err != nil {
+				e.metricState = "degraded"
+				continue
+			}
+			if len(points) == 0 {
+				continue
+			}
+			metric := spec.Metric
+			if metric == "" {
+				metric = "error_ratio"
+			}
+			series := anomaly.Series{Service: svc.Name, Metric: metric, Points: points}
+			found, err := det.Detect(series, spec.Params)
 			if err != nil {
 				continue
 			}
@@ -357,8 +379,33 @@ func (e *Engine) detectAnomalies(ctx context.Context, services []domain.Service,
 	return signals
 }
 
+func (e *Engine) detectorSpecs() []DetectorSpec {
+	if len(e.Detectors) > 0 {
+		return e.Detectors
+	}
+	return []DetectorSpec{
+		{Name: "zscore", Metric: "error_ratio"},
+		{Name: "rolling_window", Metric: "error_ratio"},
+		{Name: "threshold", Metric: "error_ratio", Params: anomaly.Params{Threshold: 0.05}},
+		{Name: "rate_of_change", Metric: "error_ratio"},
+		{Name: "mad", Metric: "error_ratio"},
+		{Name: "ewma", Metric: "error_ratio"},
+		{Name: "seasonal", Metric: "error_ratio"},
+		{Name: "threshold", Metric: "latency_p99", Params: anomaly.Params{Threshold: 0.5}},
+	}
+}
+
+func (e *Engine) metricQuery(metric, service string) string {
+	switch metric {
+	case "latency_p99":
+		return e.Conventions.LatencyP99Query(service, "1m")
+	default:
+		return e.Conventions.ErrorRatioQuery(service, "1m")
+	}
+}
+
 func (e *Engine) alertSignals(ctx context.Context, now time.Time) []domain.Signal {
-	alerts, err := e.Store.ListAlerts(ctx, now.Add(-e.window()))
+	alerts, err := e.Store.ListActiveAlerts(ctx, now.Add(-e.window()))
 	if err != nil {
 		return nil
 	}
@@ -473,12 +520,14 @@ func (e *Engine) upsertGroup(ctx context.Context, g correlation.Group, services 
 		if err != nil {
 			return err
 		}
+		title, resourceID := incidentTitle(g, primary)
 		inc := domain.Incident{
 			ID:              id,
 			Severity:        severityFor(services, g, results),
 			Status:          domain.StatusDetected,
-			Title:           fmt.Sprintf("Correlated symptoms on %s", primary),
+			Title:           title,
 			Service:         primary,
+			ResourceID:      resourceID,
 			Environment:     environmentFor(services, primary),
 			StartedAt:       g.Started,
 			DetectedAt:      now,
@@ -637,7 +686,7 @@ func (e *Engine) maybeRecover(ctx context.Context, inc domain.Incident, now time
 	if !saw {
 		return nil
 	}
-	alerts, err := e.Store.ListAlerts(ctx, now.Add(-e.window()))
+	alerts, err := e.Store.ListActiveAlerts(ctx, now.Add(-e.window()))
 	if err != nil {
 		return err
 	}
@@ -666,30 +715,37 @@ func (e *Engine) maybeRecover(ctx context.Context, inc domain.Incident, now time
 // deterministic analysis in place with ai_status=degraded.
 func (e *Engine) AnalyzeIncident(ctx context.Context, id, actor string) (domain.Incident, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	inc, err := e.Store.GetIncident(ctx, id)
 	if err != nil {
+		e.mu.Unlock()
 		return domain.Incident{}, err
 	}
 	now := e.now()
 	results, err := e.Store.LatestSLOResults(ctx, "")
 	if err != nil {
+		e.mu.Unlock()
 		return domain.Incident{}, err
 	}
 	e.applyAnalysis(ctx, &inc, results, now)
 	if inc.Analysis == nil {
-		return inc, e.Store.SaveIncident(ctx, inc)
+		err = e.Store.SaveIncident(ctx, inc)
+		e.mu.Unlock()
+		return inc, err
 	}
 	inc.Events = append(inc.Events, domain.TimelineEntry{
 		ID: id + "-analysis-" + now.Format("150405.000"), At: now, Kind: "analysis", Actor: actor,
 		Message: "Deterministic analysis refreshed",
 	})
-	if e.AIEnabled && e.AI != nil {
+	updated := inc.UpdatedAt
+	var pack domain.EvidencePack
+	var provider ai.Provider
+	callAI := e.AIEnabled && e.AI != nil
+	if callAI {
 		k8s := e.k8sFor(&inc)
 		for i := range k8s {
 			k8s[i].Message = redaction.RedactString(e.policy(), k8s[i].Message)
 		}
-		pack := domain.EvidencePack{
+		pack = domain.EvidencePack{
 			Incident:         inc,
 			SLOStatus:        results,
 			Analysis:         inc.Analysis,
@@ -697,26 +753,51 @@ func (e *Engine) AnalyzeIncident(ctx context.Context, id, actor string) (domain.
 			KubernetesEvents: k8s,
 		}
 		e.redactEvidence(&pack)
-		model, err := e.AI.Analyze(ctx, pack)
-		if err != nil {
-			degraded := ai.Degraded(*inc.Analysis, err)
-			inc.Analysis = &degraded
-			inc.Events = append(inc.Events, domain.TimelineEntry{
-				ID: id + "-ai-degraded", At: now, Kind: "ai", Actor: e.AI.Name(),
-				Message: "AI analysis degraded: " + err.Error(),
-			})
-		} else {
-			merged := ai.Merge(*inc.Analysis, model, e.AI.Name())
-			inc.Analysis = &merged
-			inc.Summary = merged.Summary
-			inc.SuspectedCauses = merged.Hypotheses
-			inc.Events = append(inc.Events, domain.TimelineEntry{
-				ID: id + "-ai", At: now, Kind: "ai", Actor: e.AI.Name(),
-				Message: "AI-assisted narrative attached. Evidence grades were not upgraded by the model.",
-			})
-		}
+		provider = e.AI
 	}
-	inc.UpdatedAt = now
+	if err := e.Store.SaveIncident(ctx, inc); err != nil {
+		e.mu.Unlock()
+		return domain.Incident{}, err
+	}
+	e.mu.Unlock()
+
+	if !callAI {
+		_ = e.Store.AddAudit(ctx, domain.AuditEvent{
+			ID: "audit-" + id + "-" + now.Format("150405.000"), At: now, Actor: actor, Action: "incident.analyze",
+			Target: id, Reason: "analysis requested",
+		})
+		return inc, nil
+	}
+
+	model, aiErr := provider.Analyze(ctx, pack)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	fresh, err := e.Store.GetIncident(ctx, id)
+	if err != nil {
+		return domain.Incident{}, err
+	}
+	if !fresh.UpdatedAt.Equal(inc.UpdatedAt) && fresh.UpdatedAt.After(updated) && fresh.UpdatedAt.After(inc.UpdatedAt) {
+		return fresh, nil
+	}
+	inc = fresh
+	if aiErr != nil {
+		degraded := ai.Degraded(*inc.Analysis, aiErr)
+		inc.Analysis = &degraded
+		inc.Events = append(inc.Events, domain.TimelineEntry{
+			ID: id + "-ai-degraded", At: now, Kind: "ai", Actor: provider.Name(),
+			Message: "AI analysis degraded: " + aiErr.Error(),
+		})
+	} else if inc.Analysis != nil {
+		merged := ai.Merge(*inc.Analysis, model, provider.Name())
+		inc.Analysis = &merged
+		inc.Summary = merged.Summary
+		inc.SuspectedCauses = merged.Hypotheses
+		inc.Events = append(inc.Events, domain.TimelineEntry{
+			ID: id + "-ai", At: now, Kind: "ai", Actor: provider.Name(),
+			Message: "AI-assisted narrative attached. Evidence grades were not upgraded by the model.",
+		})
+	}
+	inc.UpdatedAt = e.now()
 	if err := e.Store.SaveIncident(ctx, inc); err != nil {
 		return domain.Incident{}, err
 	}
@@ -790,11 +871,11 @@ func (e *Engine) redactPack(pack *rca.Pack) {
 	policy := e.policy()
 	for i := range pack.Logs {
 		pack.Logs[i].Body = redaction.RedactString(policy, pack.Logs[i].Body)
-		pack.Logs[i].Attributes = redaction.RedactAttributes(policy, pack.Logs[i].Attributes)
+		pack.Logs[i].Attributes = redactEvidenceAttrs(policy, pack.Logs[i].Attributes)
 	}
 	for i := range pack.Traces {
 		pack.Traces[i].Error = redaction.RedactString(policy, pack.Traces[i].Error)
-		pack.Traces[i].Operation = redaction.RedactString(policy, pack.Traces[i].Operation)
+		pack.Traces[i].Operation = redaction.RedactQuery(policy, redaction.RedactString(policy, pack.Traces[i].Operation))
 	}
 	for i := range pack.Changes {
 		pack.Changes[i].Summary = redaction.RedactString(policy, pack.Changes[i].Summary)
@@ -824,8 +905,29 @@ func (e *Engine) redactSignals(inc *domain.Incident) {
 	policy := e.policy()
 	for i := range inc.Signals {
 		inc.Signals[i].Summary = redaction.RedactString(policy, inc.Signals[i].Summary)
-		inc.Signals[i].Attributes = redaction.RedactAttributes(policy, inc.Signals[i].Attributes)
+		inc.Signals[i].Attributes = redactEvidenceAttrs(policy, inc.Signals[i].Attributes)
 	}
+}
+
+func redactEvidenceAttrs(policy redaction.Policy, in map[string]string) map[string]string {
+	asAny := map[string]any{}
+	for k, v := range in {
+		asAny[k] = v
+	}
+	mapped := redaction.RedactMap(policy, asAny)
+	out := map[string]string{}
+	for k, v := range mapped {
+		s, _ := v.(string)
+		out[k] = s
+	}
+	out = redaction.RedactHeaders(policy, out)
+	for k, v := range out {
+		lk := strings.ToLower(k)
+		if lk == "url.query" || lk == "url.full" || strings.HasPrefix(lk, "http.request.header.") {
+			out[k] = redaction.RedactQuery(policy, v)
+		}
+	}
+	return out
 }
 
 func operationalWindow(w domain.SLOWindow) bool {
@@ -850,17 +952,109 @@ func (e *Engine) lookback() time.Duration {
 }
 
 func primaryService(g correlation.Group) string {
+	if len(g.Services) == 0 {
+		return ""
+	}
 	counts := map[string]int{}
 	for _, s := range g.Signals {
+		if s.Service == "" {
+			continue
+		}
 		counts[s.Service]++
 	}
-	best := g.Services[0]
+	best := ""
 	for _, s := range g.Services {
-		if counts[s] > counts[best] {
+		if s == "" {
+			continue
+		}
+		if best == "" || counts[s] > counts[best] {
 			best = s
 		}
 	}
 	return best
+}
+
+func incidentTitle(g correlation.Group, primary string) (string, string) {
+	resourceID, resourceName, rule := resourceFacts(g)
+	if primary != "" {
+		return fmt.Sprintf("Correlated symptoms on %s", primary), resourceID
+	}
+	if resourceName != "" {
+		return "Correlated symptoms on " + resourceName, resourceID
+	}
+	if rule != "" {
+		return "Correlated symptoms for " + rule, resourceID
+	}
+	return "Correlated symptoms", resourceID
+}
+
+func resourceFacts(g correlation.Group) (id, name, rule string) {
+	for _, s := range append(append([]domain.Signal{}, g.Signals...), g.Context...) {
+		if s.Attributes == nil {
+			continue
+		}
+		if id == "" {
+			id = s.Attributes["resource_id"]
+		}
+		if rule == "" {
+			rule = s.Attributes["alertname"]
+			if rule == "" {
+				rule = s.Attributes["alert_rule"]
+			}
+		}
+	}
+	name = id
+	if i := strings.LastIndex(id, "/"); i >= 0 && i < len(id)-1 {
+		name = id[i+1:]
+	}
+	return id, name, rule
+}
+
+func multiBurnSignal(def domain.SLODefinition, results []domain.SLOResult, now time.Time) *domain.Signal {
+	var rows []domain.SLOResult
+	for _, r := range results {
+		if r.Service == def.Service && r.SLO == def.Name {
+			rows = append(rows, r)
+		}
+	}
+	if len(rows) < 2 {
+		return nil
+	}
+	sort.Slice(rows, func(i, j int) bool { return windowRank(rows[i].Window) < windowRank(rows[j].Window) })
+	short, long := rows[0], rows[len(rows)-1]
+	if short.Window == long.Window || !slo.MultiBurn(short, long, 14.4, 6) {
+		return nil
+	}
+	sig := domain.Signal{
+		ID:          fmt.Sprintf("slo-page-%s-%s", def.Service, def.Name),
+		Type:        domain.SignalSLO,
+		Service:     def.Service,
+		Severity:    "critical",
+		Summary:     fmt.Sprintf("%s %s multi-window burn rate page (%s %.2f, %s %.2f)", def.Service, def.Name, short.Window, short.BurnRate, long.Window, long.BurnRate),
+		Fingerprint: fmt.Sprintf("slo|%s|%s|page", def.Service, def.Name),
+		OccurredAt:  now,
+		Attributes:  map[string]string{"slo": def.Name, "page": "multi_burn"},
+	}
+	return &sig
+}
+
+func windowRank(name string) int {
+	switch name {
+	case "1m":
+		return 1
+	case "5m":
+		return 2
+	case "30m":
+		return 3
+	case "1h":
+		return 4
+	case "6h":
+		return 5
+	case "30d":
+		return 6
+	default:
+		return 3
+	}
 }
 
 func severityFor(services []domain.Service, g correlation.Group, results []domain.SLOResult) string {

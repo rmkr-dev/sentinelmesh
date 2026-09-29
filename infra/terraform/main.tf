@@ -49,14 +49,16 @@ module "keyvault" {
 }
 
 module "aks" {
-  count               = local.enable_aks ? 1 : 0
-  source              = "./modules/aks"
-  name                = "${var.prefix}-aks"
-  location            = var.location
-  resource_group_name = module.resource_group.name
-  dns_prefix          = "${var.prefix}-aks"
-  subnet_id           = local.enable_net ? module.network[0].aks_subnet_id : null
-  tags                = var.tags
+  count                      = local.enable_aks ? 1 : 0
+  source                     = "./modules/aks"
+  name                       = "${var.prefix}-aks"
+  location                   = var.location
+  resource_group_name        = module.resource_group.name
+  dns_prefix                 = "${var.prefix}-aks"
+  subnet_id                  = local.enable_net ? module.network[0].aks_subnet_id : null
+  enable_container_insights  = true
+  log_analytics_workspace_id = module.monitoring.workspace_id
+  tags                       = var.tags
 }
 
 module "grafana" {

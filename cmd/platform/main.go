@@ -11,7 +11,11 @@ import (
 	"time"
 
 	"github.com/rmkr-dev/sentinelmesh/internal/ai"
+	"github.com/rmkr-dev/sentinelmesh/internal/anomaly"
 	"github.com/rmkr-dev/sentinelmesh/internal/api"
+	"github.com/rmkr-dev/sentinelmesh/internal/auth"
+	"github.com/rmkr-dev/sentinelmesh/internal/azure"
+	azauth "github.com/rmkr-dev/sentinelmesh/internal/azure/auth"
 	"github.com/rmkr-dev/sentinelmesh/internal/config"
 	"github.com/rmkr-dev/sentinelmesh/internal/domain"
 	"github.com/rmkr-dev/sentinelmesh/internal/engine"
@@ -23,7 +27,6 @@ import (
 	"github.com/rmkr-dev/sentinelmesh/internal/telemetryquery"
 	"github.com/rmkr-dev/sentinelmesh/internal/version"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"go.opentelemetry.io/otel/metric/noop"
 )
 
 func main() {
@@ -64,28 +67,44 @@ func main() {
 		slog.Error("seed", "error", err.Error())
 		os.Exit(1)
 	}
-	books, err := runbook.LoadDir(filepath.Join(dir, "..", cfg.Paths.Runbooks))
-	if err != nil {
-		// Runbooks may live at the repository root rather than under config/.
-		books, err = runbook.LoadDir(env("RUNBOOK_DIR", "runbooks"))
-	}
+	runbookDir, err := config.ResolveDir("RUNBOOK_DIR", cfg.Paths.Runbooks, "/app/runbooks")
 	if err != nil {
 		slog.Error("runbooks", "error", err.Error())
 		os.Exit(1)
 	}
-	if env("RUNBOOK_DIR", "") == "" {
-		if extra, err := runbook.LoadDir("/app/runbooks"); err == nil && len(extra) > 0 {
-			books = extra
-		}
+	books, err := runbook.LoadDir(runbookDir)
+	if err != nil {
+		slog.Error("runbooks", "error", err.Error())
+		os.Exit(1)
 	}
-
+	webDir, err := config.ResolveDir("WEB_DIR", cfg.Paths.Web, "/app/web")
+	if err != nil {
+		slog.Error("web", "error", err.Error())
+		os.Exit(1)
+	}
+	promptDir, err := config.ResolveDir("PROMPT_DIR", cfg.Paths.Prompts, "/app/prompts")
+	if err != nil {
+		slog.Error("prompts", "error", err.Error())
+		os.Exit(1)
+	}
 	prompt := ""
-	if b, err := os.ReadFile(filepath.Join(env("PROMPT_DIR", "prompts"), "root-cause-analysis", "system.md")); err == nil {
+	if b, err := os.ReadFile(filepath.Join(promptDir, "root-cause-analysis", "system.md")); err == nil {
 		prompt = string(b)
 	}
-	provider := buildAI(cfg.AI, prompt)
+	provider, err := buildAI(cfg.AI, prompt)
+	if err != nil {
+		slog.Error("ai", "error", err.Error())
+		os.Exit(1)
+	}
 	deps := engine.Dependencies{}
-	if cfg.Telemetry.PrometheusURL != "" {
+	if cfg.Telemetry.Backend == "azure" && cfg.Azure.MonitorEndpoint != "" {
+		cred, err := azauth.New(azauth.ModeFromEnv(cfg.Azure.AuthMode), cfg.Environment)
+		if err != nil {
+			slog.Error("azure metrics", "error", err.Error())
+			os.Exit(1)
+		}
+		deps.Metrics = telemetryquery.AzureMetrics{Client: azure.Client{Credential: cred}, Endpoint: cfg.Azure.MonitorEndpoint}
+	} else if cfg.Telemetry.PrometheusURL != "" {
 		deps.Metrics = telemetryquery.PrometheusClient{BaseURL: cfg.Telemetry.PrometheusURL}
 	}
 	if cfg.Telemetry.JaegerURL != "" {
@@ -110,8 +129,9 @@ func main() {
 		AIEnabled: cfg.AI.Enabled && provider != nil,
 		Redaction: cfg.Telemetry.Policy(),
 		Retention: cfg.Engine.AnomalyRetention,
+		Detectors: detectorSpecs(cfg),
 	}
-	if os.Getenv("KUBERNETES_ENABLED") == "true" {
+	if cfg.Kubernetes.Enabled {
 		host := os.Getenv("KUBERNETES_SERVICE_HOST")
 		port := os.Getenv("KUBERNETES_SERVICE_PORT")
 		if port == "" {
@@ -124,7 +144,7 @@ func main() {
 		}
 		eng.Cluster = kube.Client{
 			BaseURL: "https://" + host + ":" + port, HTTP: httpClient,
-			ServiceLabel: env("KUBERNETES_SERVICE_LABEL", "app.kubernetes.io/name"),
+			ServiceLabel: firstNonEmpty(cfg.Kubernetes.ServiceLabel, "app.kubernetes.io/name"),
 		}
 	}
 
@@ -143,30 +163,52 @@ func main() {
 		DemoEnabled:        cfg.Demo.Enabled,
 		RemediationEnabled: cfg.Remediation.Enabled,
 		DemoApply:          demoApply(st),
+		TokenPath:          "/var/run/secrets/kubernetes.io/serviceaccount/token",
+		CAPath:             "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+		AzureAllow:         allowed,
 	})
 	if err != nil {
 		slog.Error("remediation executor", "error", err.Error())
 		os.Exit(1)
 	}
 
+	var verifier *auth.Verifier
+	if cfg.Auth.OIDC.Issuer != "" {
+		verifier, err = auth.NewVerifier(ctx, auth.Config{
+			Issuer: cfg.Auth.OIDC.Issuer, Audience: cfg.Auth.OIDC.Audience, RolesClaim: cfg.Auth.OIDC.RolesClaim,
+		})
+		if err != nil {
+			slog.Error("oidc", "error", err.Error())
+			os.Exit(1)
+		}
+	}
 	srv := &api.Server{
-		Store:        st,
-		Engine:       eng,
-		Runbooks:     books,
-		Gate:         gate,
-		Executor:     exec,
-		Demo:         cfg.Demo.Enabled,
-		Token:        cfg.Auth.Token,
-		WebhookToken: cfg.Auth.WebhookToken,
-		Redaction:    cfg.Telemetry.Policy(),
-		WebDir:       env("WEB_DIR", "web"),
-		GrafanaURL:   cfg.UI.GrafanaURL,
-		JaegerURL:    cfg.UI.JaegerURL,
-		Log:          logger,
+		Store:             st,
+		Engine:            eng,
+		Runbooks:          books,
+		Gate:              gate,
+		Executor:          exec,
+		Demo:              cfg.Demo.Enabled,
+		Environment:       cfg.Environment,
+		HonorActorHeader:  cfg.Demo.Enabled && (cfg.Environment == "local" || cfg.Environment == "dev"),
+		Token:             cfg.Auth.Token,
+		WebhookToken:      cfg.Auth.WebhookToken,
+		Principals:        principalsFrom(cfg),
+		OIDC:              verifier,
+		CorrelationWindow: cfg.Engine.CorrelationWindow,
+		Redaction:         cfg.Telemetry.Policy(),
+		WebDir:            webDir,
+		GrafanaURL:        cfg.UI.GrafanaURL,
+		JaegerURL:         cfg.UI.JaegerURL,
+		Log:               logger,
+	}
+	eng.OnSLO = srv.PublishSLO
+	if cfg.Azure.Enabled {
+		go runAzurePoller(ctx, cfg, st, logger)
 	}
 	httpServer := &http.Server{
 		Addr:              cfg.HTTP.Addr,
-		Handler:           otelhttp.NewHandler(srv.Handler(), "platform", otelhttp.WithMeterProvider(noop.NewMeterProvider())),
+		Handler:           otelhttp.NewHandler(srv.Handler(), "http"),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -200,6 +242,9 @@ func main() {
 	}()
 	go func() {
 		<-ctx.Done()
+		if pg, ok := st.(*store.Postgres); ok {
+			pg.ReleaseLock()
+		}
 		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(c)
@@ -249,36 +294,105 @@ func seed(ctx context.Context, st store.Store, cfg config.Config, dir string) er
 	return nil
 }
 
-func buildAI(cfg config.AIConfig, prompt string) ai.Provider {
+func buildAI(cfg config.AIConfig, prompt string) (ai.Provider, error) {
 	if !cfg.Enabled {
-		return nil
+		return nil, nil
 	}
 	switch cfg.Provider {
-	case "", "mock":
-		return ai.MockProvider{}
 	case "openai-compatible", "local":
 		if cfg.BaseURL == "" || cfg.Model == "" {
-			slog.Warn("ai provider is missing base_url or model; analysis stays deterministic")
-			return nil
+			return nil, errString("ai.provider requires base_url and model when enabled")
 		}
 		return ai.NewChatProvider(ai.ChatConfig{
 			Name: cfg.Provider, BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: cfg.Model,
 			Temperature: cfg.Temperature, MaxTokens: cfg.MaxTokens, SystemPrompt: prompt,
-		})
+		}), nil
 	case "azure-openai":
 		if cfg.BaseURL == "" || cfg.Model == "" {
-			slog.Warn("azure openai is missing base_url or deployment; analysis stays deterministic")
-			return nil
+			return nil, errString("azure openai requires base_url and model when enabled")
 		}
 		return ai.NewChatProvider(ai.ChatConfig{
 			Name: "azure-openai", BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: cfg.Model,
 			Temperature: cfg.Temperature, MaxTokens: cfg.MaxTokens, APIVersion: cfg.APIVersion,
 			Azure: true, SystemPrompt: prompt,
-		})
+		}), nil
 	default:
-		slog.Warn("unknown ai provider; analysis stays deterministic", "provider", cfg.Provider)
-		return nil
+		return nil, errString("ai.provider is required when ai.enabled is true")
 	}
+}
+
+func principalsFrom(cfg config.Config) []api.Principal {
+	var out []api.Principal
+	if cfg.Auth.Token != "" {
+		out = append(out, api.Principal{Name: "api", Token: cfg.Auth.Token, Role: auth.RoleAdmin})
+	}
+	for _, p := range cfg.Auth.Principals {
+		if p.Token == "" {
+			continue
+		}
+		out = append(out, api.Principal{Name: p.Name, Token: p.Token, Role: p.Role})
+	}
+	if cfg.Auth.WebhookToken != "" {
+		out = append(out, api.Principal{Name: "alertmanager", Token: cfg.Auth.WebhookToken, Role: auth.RoleResponder, WebhookOnly: true})
+	}
+	return out
+}
+
+func detectorSpecs(cfg config.Config) []engine.DetectorSpec {
+	var out []engine.DetectorSpec
+	for _, d := range cfg.Engine.Detectors {
+		out = append(out, engine.DetectorSpec{
+			Name: d.Name, Metric: d.Metric,
+			Params: anomaly.Params{Threshold: d.Threshold, Window: d.Window, MinPoints: d.MinPoints},
+		})
+	}
+	return out
+}
+
+func runAzurePoller(ctx context.Context, cfg config.Config, st store.Store, logger *slog.Logger) {
+	cred, err := azauth.New(azauth.ModeFromEnv(cfg.Azure.AuthMode), cfg.Environment)
+	if err != nil {
+		logger.Error("azure poller", "error", err.Error())
+		return
+	}
+	dir := cfg.Azure.ResourceTypes
+	if dir == "" {
+		dir = "config/azure/resource-types"
+	}
+	types, err := azure.LoadResourceTypes(dir)
+	if err != nil {
+		logger.Error("azure resource types", "error", err.Error())
+		return
+	}
+	poller := azure.Poller{
+		Client:       azure.Client{Credential: cred},
+		Subscription: cfg.Azure.Subscription,
+		WorkspaceID:  cfg.Azure.WorkspaceID,
+		Types:        types,
+	}
+	tick := func() {
+		if err := poller.Poll(ctx, st); err != nil {
+			logger.Warn("azure poll", "error", err.Error())
+		}
+	}
+	tick()
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			tick()
+		}
+	}
+}
+
+func firstNonEmpty(v, def string) string {
+	if v != "" {
+		return v
+	}
+	return def
 }
 
 func demoApply(st store.Store) func(context.Context, domain.RemediationRequest) (map[string]any, map[string]any, error) {
@@ -305,13 +419,6 @@ func demoApply(st store.Store) func(context.Context, domain.RemediationRequest) 
 			return before, nil, errString("unsupported demo action")
 		}
 	}
-}
-
-func env(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }
 
 type errString string

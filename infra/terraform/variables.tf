@@ -27,13 +27,17 @@ variable "profile" {
 variable "alert_email" {
   type        = string
   description = "Action group email. Use a shared mailbox, not a personal secret."
-  default     = "sre@example.com"
+
+  validation {
+    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alert_email)) && !strcontains(var.alert_email, "example.com")
+    error_message = "alert_email must be a real mailbox. Pass TF_VAR_alert_email or -var."
+  }
 }
 
 variable "tags" {
   type = map(string)
   default = {
-    product = "cloud-observability-aiops-platform"
+    product = "SentinelMesh"
     managed = "terraform"
   }
 }

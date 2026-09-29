@@ -7,8 +7,8 @@ telemetry:
 engine:
   interval: 10s
 ai:
-  enabled: true
-  provider: mock
+  enabled: false
+  provider: ""
   temperature: 0
 demo:
   enabled: true

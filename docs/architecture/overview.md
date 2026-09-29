@@ -44,7 +44,7 @@ The engine tick:
 | `internal/correlation` | Grouping |
 | `internal/incident` | State machine |
 | `internal/rca` | Evidence and hypotheses |
-| `internal/ai` | Provider interface, mock, chat completions, merge rules |
+| `internal/ai` | Provider interface, chat completions, merge rules |
 | `internal/remediation` | Policy, approval, demo executor, Kubernetes executor |
 | `internal/redaction` | Headers, query parameters, JSON fields, bearer tokens |
 | `internal/store` | Memory and PostgreSQL |

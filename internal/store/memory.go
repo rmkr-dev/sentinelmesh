@@ -321,13 +321,21 @@ func (m *Memory) SaveAlert(_ context.Context, a domain.Alert) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i := range m.alerts {
-		if m.alerts[i].Fingerprint == a.Fingerprint && m.alerts[i].StartsAt.Equal(a.StartsAt) {
-			m.alerts[i] = clone(a)
+		if sameAlert(m.alerts[i], a) {
+			merged := mergeAlert(&m.alerts[i], a)
+			m.alerts[i] = clone(merged)
 			return nil
 		}
 	}
-	m.alerts = append(m.alerts, clone(a))
+	m.alerts = append(m.alerts, clone(mergeAlert(nil, a)))
 	return nil
+}
+
+func sameAlert(prev, next domain.Alert) bool {
+	if next.ID != "" && prev.ID == next.ID {
+		return true
+	}
+	return next.Fingerprint != "" && prev.Fingerprint == next.Fingerprint
 }
 
 func (m *Memory) ListAlerts(_ context.Context, since time.Time) ([]domain.Alert, error) {
@@ -339,6 +347,18 @@ func (m *Memory) ListAlerts(_ context.Context, since time.Time) ([]domain.Alert,
 			continue
 		}
 		out = append(out, clone(a))
+	}
+	return out, nil
+}
+
+func (m *Memory) ListActiveAlerts(_ context.Context, since time.Time) ([]domain.Alert, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []domain.Alert
+	for _, a := range m.alerts {
+		if alertActive(a, since) {
+			out = append(out, clone(a))
+		}
 	}
 	return out, nil
 }

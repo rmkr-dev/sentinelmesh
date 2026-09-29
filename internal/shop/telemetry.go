@@ -18,9 +18,6 @@ type Telemetry struct {
 	TracerName string
 }
 
-// InstallPropagator sets the process-wide W3C propagator.
-func InstallPropagator() { telemetry.InstallPropagator() }
-
 // Setup configures OTLP traces, metrics, and logs through the shared bootstrap.
 func Setup(ctx context.Context, service string) (Telemetry, error) {
 	h, err := telemetry.Setup(ctx, telemetry.Options{ServiceName: service})

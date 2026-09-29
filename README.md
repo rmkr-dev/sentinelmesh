@@ -57,12 +57,12 @@ make demo
 | Area | What you get |
 | --- | --- |
 | Telemetry | OTLP traces, metrics, logs, runtime metrics, and optional Pyroscope profiles |
-| Azure | Resource Graph, Log Analytics, and the common alert schema are covered by an in-process replay. A subscription apply was not run |
+| Azure | Common alert schema, Resource Graph inventory, Log Analytics activity and health, and PromQL when `telemetry.backend=azure`. A subscription apply was not run |
 | Kubernetes | Read-only adapter for warning events, pod symptoms, and rollout changes |
 | SRE | SLOs, error budgets, multi-window burn rates, Alertmanager webhook |
-| Detection | z-score, rolling window, threshold, rate-of-change |
+| Detection | z-score, rolling window, threshold, rate-of-change, MAD, EWMA, and seasonal on error ratio, plus a p99 latency threshold |
 | Incidents | Correlation, timeline, deployment lookback, postmortem from recorded facts |
-| AIOps | Mock, OpenAI-compatible, Azure OpenAI. Schema-checked. Cannot upgrade a correlation to a cause |
+| AIOps | Deterministic analysis always runs. OpenAI-compatible and Azure OpenAI are optional and schema-checked. They cannot upgrade a correlation to a cause |
 | Change | Deployment records and demo faults are first-class evidence |
 | Delivery | Terraform profiles, Helm, GitHub Actions, OIDC deploy workflow |
 | Safety | Remediation off by default, approval required, audit log |

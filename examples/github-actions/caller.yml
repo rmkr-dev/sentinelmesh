@@ -7,4 +7,5 @@ permissions:
   contents: read
 jobs:
   ci:
-    uses: rmkr-dev/sentinelmesh/.github/workflows/service-ci.yml@v0.1.0
+    # Pin a release SHA after the first tag exists. @main tracks trunk until then.
+    uses: rmkr-dev/sentinelmesh/.github/workflows/service-ci.yml@main

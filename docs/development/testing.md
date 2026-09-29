@@ -8,9 +8,9 @@
 - Incident transitions
 - RCA deployment correlation versus confirmation
 - Redaction
-- AI merge rules, the mock provider, and a chat provider against `httptest`
+- AI merge rules and a chat provider against `httptest`
 - Runbook matching
-- Remediation policy, self-approval rejection, and a fake Kubernetes API for rollback
+- Remediation policy, self-approval rejection, and an httptest Kubernetes API for rollback
 - Config overlay and SLO file parsing
 - Onboarding file generation
 - Shop fault behavior

@@ -20,4 +20,4 @@ Latency good events are the histogram bucket at `threshold_ms`.
 
 Windows in the sample files include `1m`, `5m`, `1h`, and `30d`. The 30 day window is the compliance window. Short windows feed burn alerts. The incident engine opens and auto-resolves from windows of five minutes or less. The one-hour and 30 day results stay on the SLO record so error-budget consumption remains visible after the fast window has recovered. Local evaluation uses the same definitions so a demo does not depend on a hard-coded percentage.
 
-`GET /api/v1/slos` returns the latest computed results. Empty traffic is `no_data`, not a fake healthy number.
+`GET /api/v1/slos` returns the latest computed results. Empty traffic is `no_data`. It is not reported as healthy.
